@@ -1,0 +1,14 @@
+# Files EAS Build should not upload
+.git/
+.github/
+node_modules/
+coverage/
+exports/
+user-data/
+crash-reports/
+*.zip
+*.pdf
+*.log
+.env
+.env.*
+!.env.example

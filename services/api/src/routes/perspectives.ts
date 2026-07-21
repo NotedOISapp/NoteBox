@@ -30,6 +30,7 @@ const router = Router();
 export interface PerspectiveTestGeneratorInput {
   body: string;
   historyCount: number;
+  receiptTextCount: number;
   metadata: {
     recordConfidence: RecordConfidence;
     accountabilityRead: AccountabilityRead;
@@ -128,6 +129,31 @@ router.post('/:id/perspectives', auditRoute('generate_perspectives', 'note'), as
         message: 'AI processing or third-party AI sharing consent has not been granted by the user.',
       });
       return;
+    }
+
+    // Resolve explicitly requested Receipt context before reserving usage or
+    // contacting an AI provider. Never silently generate without it.
+    let receiptOcrText = '';
+    let receiptTextCount = 0;
+    if (useReceipts) {
+      const ocrRecords = await db
+        .select({ extractedText: ocrTexts.extractedText })
+        .from(ocrTexts)
+        .innerJoin(receipts, eq(ocrTexts.receiptId, receipts.id))
+        .where(and(
+          eq(receipts.noteId, id),
+          eq(receipts.userId, userId),
+          eq(receipts.scanStatus, 'clean'),
+        ));
+      if (ocrRecords.length === 0) {
+        res.status(409).json({
+          error: 'RECEIPT_TEXT_NOT_READY',
+          message: 'No clean Receipt with ready extracted text is available for this Perspective.',
+        });
+        return;
+      }
+      receiptTextCount = ocrRecords.length;
+      receiptOcrText = ocrRecords.map((record) => redactPII(decrypt(record.extractedText))).join('\n');
     }
 
     const testGenerator = getPerspectiveTestGenerator();
@@ -328,23 +354,6 @@ router.post('/:id/perspectives', auditRoute('generate_perspectives', 'note'), as
 
     const redactedHistory = historyNotes.map((hn) => redactPII(decrypt(hn.body)));
 
-    // 7. Fetch OCR Receipt Context if approved
-    let receiptOcrText = '';
-    if (useReceipts) {
-      const ocrRecords = await db
-        .select({ extractedText: ocrTexts.extractedText })
-        .from(ocrTexts)
-        .innerJoin(receipts, eq(ocrTexts.receiptId, receipts.id))
-        .where(
-          and(
-            eq(receipts.noteId, id),
-            eq(receipts.userId, userId),
-            eq(receipts.scanStatus, 'clean')
-          )
-        );
-      receiptOcrText = ocrRecords.map(r => redactPII(decrypt(r.extractedText))).join('\n');
-    }
-
     // Perform initial classification of the note content
     let recordConfidence: RecordConfidence = 'developing';
     let accountabilityRead: AccountabilityRead = 'mixed';
@@ -538,6 +547,7 @@ router.post('/:id/perspectives', auditRoute('generate_perspectives', 'note'), as
         tempRawData = testGenerator({
           body: redactedBody,
           historyCount: redactedHistory.length,
+          receiptTextCount,
           metadata: { recordConfidence, accountabilityRead, contextStatus },
         });
       }

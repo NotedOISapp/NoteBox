@@ -102,6 +102,20 @@ describe('Perspectives Route Tests', () => {
     expect(unfiltered.hardRead).toBeDefined();
   });
 
+  it('rejects explicit Receipt use before reserving generation when no OCR text is ready', async () => {
+    const resNote = await request(app)
+      .post('/v1/notes')
+      .set('Authorization', `Bearer ${token}`)
+      .send({ boxId, body: 'A Note whose Receipt text is not ready.' });
+
+    const res = await request(app)
+      .post(`/v1/notes/${resNote.body.id}/perspectives`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({ useReceipts: true });
+    expect(res.status).toBe(409);
+    expect(res.body.error).toBe('RECEIPT_TEXT_NOT_READY');
+  });
+
   it('lists existing perspectives for a note', async () => {
     const res = await request(app)
       .get(`/v1/notes/${noteId}/perspectives`)

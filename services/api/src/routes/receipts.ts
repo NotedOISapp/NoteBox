@@ -9,6 +9,7 @@ import {
   ocrTexts,
   notes,
   privacyPreferences,
+  receiptProcessingJobs,
   users,
   uploadReservations,
 } from '../db/schema.js';
@@ -18,8 +19,9 @@ import { auditRoute } from '../middleware/audit.js';
 import { trackEvent } from '../utils/telemetry.js';
 import { eligibilityMiddleware } from '../middleware/eligibility.js';
 import { getEffectiveEntitlement } from '../services/entitlementResolver.js';
-import { getStorage } from '../compliance/storage.js';
+import { getStorage, StorageObjectAlreadyExistsError } from '../compliance/storage.js';
 import { logError } from '../utils/logger.js';
+import { RECEIPT_PROCESSING_MAX_BYTES } from '../config/env.js';
 
 const router = Router();
 const FREE_QUOTA_BYTES = 250n * 1024n * 1024n;
@@ -42,6 +44,25 @@ router.use(eligibilityMiddleware);
 
 function normalizeContentType(value: string): string {
   return value.split(';', 1)[0].trim().toLowerCase();
+}
+
+async function ensureReceiptJob(
+  tx: any,
+  receipt: typeof receipts.$inferSelect,
+  jobType: 'scan' | 'ocr',
+): Promise<void> {
+  await tx.insert(receiptProcessingJobs).values({
+    receiptId: receipt.id,
+    userId: receipt.userId,
+    jobType,
+    storageKey: receipt.storageKey,
+    expectedObjectVersion: receipt.providerObjectVersion,
+    expectedSha256: receipt.sha256 || null,
+    expectedContentType: normalizeContentType(receipt.contentType),
+    expectedSizeBytes: receipt.sizeBytes,
+  }).onConflictDoNothing({
+    target: [receiptProcessingJobs.receiptId, receiptProcessingJobs.jobType],
+  });
 }
 
 router.get('/', validateRequest({ query: listReceiptsQuerySchema }), async (req: AuthenticatedRequest, res: Response) => {
@@ -72,6 +93,13 @@ router.get('/', validateRequest({ query: listReceiptsQuerySchema }), async (req:
 router.post('/upload-url', validateRequest({ body: uploadUrlSchema }), async (req: AuthenticatedRequest, res: Response) => {
   const userId = req.user!.userId;
   const { noteId, contentType, sizeBytes, sha256 } = req.body;
+  if (sizeBytes > RECEIPT_PROCESSING_MAX_BYTES) {
+    res.status(413).json({
+      error: 'RECEIPT_PROCESSING_SIZE_LIMIT',
+      maxSizeBytes: RECEIPT_PROCESSING_MAX_BYTES,
+    });
+    return;
+  }
   try {
     let response: Record<string, unknown> | null = null;
     let domainError: { status: number; error: string; message: string } | null = null;
@@ -154,7 +182,7 @@ router.post('/upload-url', validateRequest({ body: uploadUrlSchema }), async (re
 });
 
 // Development/test upload path. Production clients receive a provider-signed URL instead.
-router.put('/upload/:reservationId', raw({ type: '*/*', limit: '11mb' }), validateRequest({ params: reservationParamSchema }), async (req: AuthenticatedRequest, res: Response) => {
+router.put('/upload/:reservationId', raw({ type: '*/*', limit: RECEIPT_PROCESSING_MAX_BYTES }), validateRequest({ params: reservationParamSchema }), async (req: AuthenticatedRequest, res: Response) => {
   try {
     const [reservation] = await db.select().from(uploadReservations).where(and(
       eq(uploadReservations.id, req.params.reservationId as string),
@@ -165,8 +193,8 @@ router.put('/upload/:reservationId', raw({ type: '*/*', limit: '11mb' }), valida
       return;
     }
     const body = Buffer.isBuffer(req.body) ? req.body : Buffer.from(req.body ?? '');
-    if (BigInt(body.length) > reservation.maxSizeBytes) {
-      res.status(413).json({ error: 'SIZE_EXCEEDS_RESERVATION' });
+    if (BigInt(body.length) !== reservation.maxSizeBytes) {
+      res.status(400).json({ error: 'SIZE_DOES_NOT_MATCH_RESERVATION' });
       return;
     }
     const contentType = normalizeContentType(req.headers['content-type'] || 'application/octet-stream');
@@ -179,11 +207,16 @@ router.put('/upload/:reservationId', raw({ type: '*/*', limit: '11mb' }), valida
       key: reservation.storageKey,
       stream: body,
       contentType,
+      ifNoneMatch: '*',
     });
     await db.update(uploadReservations).set({ providerObjectVersion: stored.versionId ?? null })
       .where(eq(uploadReservations.id, reservation.id));
     res.status(201).json({ uploaded: true, sizeBytes: stored.sizeBytes, sha256: stored.sha256 });
   } catch (error) {
+    if (error instanceof StorageObjectAlreadyExistsError || (error as NodeJS.ErrnoException)?.code === 'EEXIST') {
+      res.status(409).json({ error: 'STORAGE_OBJECT_ALREADY_EXISTS' });
+      return;
+    }
     logError('Development Receipt upload failed', error);
     res.status(500).json({ error: 'UPLOAD_FAILED' });
   }
@@ -207,6 +240,9 @@ router.post('/confirm', auditRoute('upload_receipt', 'receipt'), validateRequest
         if (reservation.confirmedReceiptId) {
           [confirmed] = await tx.select().from(receipts)
             .where(eq(receipts.id, reservation.confirmedReceiptId)).limit(1);
+          if (confirmed?.scanStatus === 'pending') {
+            await ensureReceiptJob(tx, confirmed, 'scan');
+          }
           return;
         }
         domainError = { status: 409, error: 'RESERVATION_CONSUMED' }; return;
@@ -224,12 +260,19 @@ router.post('/confirm', auditRoute('upload_receipt', 'receipt'), validateRequest
 
       let metadata;
       try {
-        metadata = await getStorage().getObjectMetadata('receipts', reservation.storageKey);
+        metadata = await getStorage().getObjectMetadata(
+          'receipts',
+          reservation.storageKey,
+          reservation.providerObjectVersion,
+        );
       } catch {
         domainError = { status: 400, error: 'STORAGE_OBJECT_NOT_FOUND' }; return;
       }
-      if (BigInt(metadata.sizeBytes) > reservation.maxSizeBytes) {
-        domainError = { status: 400, error: 'SIZE_EXCEEDS_RESERVATION' }; return;
+      if (!metadata.versionId) {
+        domainError = { status: 503, error: 'STORAGE_OBJECT_VERSION_UNAVAILABLE' }; return;
+      }
+      if (BigInt(metadata.sizeBytes) !== reservation.maxSizeBytes) {
+        domainError = { status: 400, error: 'SIZE_DOES_NOT_MATCH_RESERVATION' }; return;
       }
       if (normalizeContentType(metadata.contentType) !== reservation.expectedContentType) {
         domainError = { status: 400, error: 'CONTENT_TYPE_MISMATCH' }; return;
@@ -237,7 +280,7 @@ router.post('/confirm', auditRoute('upload_receipt', 'receipt'), validateRequest
       if (reservation.expectedSha256 && metadata.sha256 !== reservation.expectedSha256) {
         domainError = { status: 400, error: 'CHECKSUM_MISMATCH' }; return;
       }
-      if (reservation.providerObjectVersion && metadata.versionId && reservation.providerObjectVersion !== metadata.versionId) {
+      if (reservation.providerObjectVersion && reservation.providerObjectVersion !== metadata.versionId) {
         domainError = { status: 409, error: 'STORAGE_OBJECT_VERSION_MISMATCH' }; return;
       }
 
@@ -268,6 +311,7 @@ router.post('/confirm', auditRoute('upload_receipt', 'receipt'), validateRequest
         noteId: note.id,
         userId,
         storageKey: reservation.storageKey,
+        providerObjectVersion: metadata.versionId,
         contentType: metadata.contentType,
         sha256: metadata.sha256 ?? reservation.expectedSha256 ?? '',
         sizeBytes: BigInt(metadata.sizeBytes),
@@ -278,6 +322,7 @@ router.post('/confirm', auditRoute('upload_receipt', 'receipt'), validateRequest
         confirmedReceiptId: confirmed.id,
         providerObjectVersion: metadata.versionId,
       }).where(eq(uploadReservations.id, reservation.id));
+      await ensureReceiptJob(tx, confirmed, 'scan');
     });
 
     const confirmationError = domainError as { status: number; error: string; message?: string } | null;
@@ -356,10 +401,39 @@ router.get('/:id/ocr', validateRequest({ params: idParamSchema }), async (req: A
       });
       return;
     }
+    if (receipt.scanStatus === 'unavailable') {
+      res.json({
+        receiptId: receipt.id,
+        status: 'unavailable',
+        reason: 'SECURITY_SCAN_UNAVAILABLE',
+      });
+      return;
+    }
+    const [ocrJob] = await db.select().from(receiptProcessingJobs).where(and(
+      eq(receiptProcessingJobs.receiptId, receipt.id),
+      eq(receiptProcessingJobs.jobType, 'ocr'),
+    )).limit(1);
+    if (ocrJob?.status === 'pending' || ocrJob?.status === 'processing') {
+      res.json({
+        receiptId: receipt.id,
+        status: 'processing',
+        stage: 'text_extraction',
+        retryAfterSeconds: 5,
+      });
+      return;
+    }
+    if (ocrJob?.status === 'unavailable') {
+      res.json({
+        receiptId: receipt.id,
+        status: 'unavailable',
+        reason: ocrJob.failureCode || 'OCR_UNAVAILABLE',
+      });
+      return;
+    }
     res.json({
       receiptId: receipt.id,
       status: 'unavailable',
-      reason: 'OCR_PROVIDER_UNAVAILABLE',
+      reason: 'OCR_NOT_REQUESTED',
     });
   } catch (error) {
     logError('OCR status request failed', error);
@@ -385,7 +459,7 @@ router.delete('/:id/ocr', auditRoute('delete_ocr_text', 'receipt'), validateRequ
   }
 });
 
-router.post('/:id/ocr', validateRequest({ params: idParamSchema }), async (req: AuthenticatedRequest, res: Response) => {
+router.post('/:id/ocr', auditRoute('extract_ocr_text', 'receipt'), validateRequest({ params: idParamSchema }), async (req: AuthenticatedRequest, res: Response) => {
   const userId = req.user!.userId;
   try {
     const [receipt] = await db.select().from(receipts).where(and(
@@ -394,7 +468,7 @@ router.post('/:id/ocr', validateRequest({ params: idParamSchema }), async (req: 
     if (!receipt) { res.status(404).json({ error: 'NotFoundError' }); return; }
     const [preferences] = await db.select().from(privacyPreferences)
       .where(eq(privacyPreferences.userId, userId)).limit(1);
-    if (!preferences?.aiProcessingAllowed) {
+    if (!preferences?.aiProcessingAllowed || !preferences.thirdPartyAiAllowed) {
       res.status(403).json({ error: 'ConsentRequired' }); return;
     }
     if (receipt.scanStatus === 'pending') {
@@ -414,6 +488,14 @@ router.post('/:id/ocr', validateRequest({ params: idParamSchema }), async (req: 
       });
       return;
     }
+    if (receipt.scanStatus === 'unavailable') {
+      res.status(503).json({
+        error: 'SECURITY_SCAN_UNAVAILABLE',
+        status: 'unavailable',
+        message: 'This Receipt could not be security scanned. No OCR text was created.',
+      });
+      return;
+    }
 
     const [existing] = await db.select().from(ocrTexts)
       .where(eq(ocrTexts.receiptId, receipt.id))
@@ -427,11 +509,43 @@ router.post('/:id/ocr', validateRequest({ params: idParamSchema }), async (req: 
       });
       return;
     }
-    await trackEvent(userId, 'ocr_extract_unavailable', { receiptId: receipt.id });
-    res.status(503).json({
-      error: 'OCR_UNAVAILABLE',
-      status: 'unavailable',
-      message: 'Text extraction is currently unavailable. No OCR text was created.',
+    await db.transaction(async (tx) => {
+      const [existingJob] = await tx.select().from(receiptProcessingJobs).where(and(
+        eq(receiptProcessingJobs.receiptId, receipt.id),
+        eq(receiptProcessingJobs.jobType, 'ocr'),
+      )).limit(1).for('update');
+      if (!existingJob) {
+        await ensureReceiptJob(tx, receipt, 'ocr');
+        return;
+      }
+      if (existingJob.status === 'unavailable' || existingJob.status === 'succeeded' || existingJob.status === 'rejected') {
+        await tx.update(receiptProcessingJobs).set({
+          status: 'pending',
+          storageKey: receipt.storageKey,
+          expectedObjectVersion: receipt.providerObjectVersion,
+          expectedSha256: receipt.sha256 || null,
+          expectedContentType: normalizeContentType(receipt.contentType),
+          expectedSizeBytes: receipt.sizeBytes,
+          provider: null,
+          providerReference: null,
+          failureCode: null,
+          attemptCount: 0,
+          nextAttemptAt: null,
+          claimedBy: null,
+          claimToken: null,
+          leaseExpiresAt: null,
+          startedAt: null,
+          completedAt: null,
+          updatedAt: new Date(),
+        }).where(eq(receiptProcessingJobs.id, existingJob.id));
+      }
+    });
+    await trackEvent(userId, 'ocr_extract_requested', { receiptId: receipt.id });
+    res.status(202).json({
+      receiptId: receipt.id,
+      status: 'processing',
+      stage: 'text_extraction',
+      retryAfterSeconds: 5,
     });
   } catch (error) {
     logError('OCR request failed', error);

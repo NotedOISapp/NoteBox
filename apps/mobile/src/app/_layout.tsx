@@ -26,7 +26,16 @@ import { AIConsentProvider } from '@/components/ai-consent-modal';
 import OnboardingScreen from './onboarding';
 import SignInScreen from '@/components/sign-in';
 import AgeGateScreen from './age-gate';
-import { authenticatePrivacyLock, getPrivacyLockEnabled, subscribeToPanicHide } from '@/services/privacy-lock';
+import { StoreKitRecovery } from '@/components/storekit-recovery';
+import {
+  authenticatePrivacyLock,
+  getPrivacyLockEnabled,
+  type PrivacyCoverState,
+  privacyCoverForActiveSession,
+  privacyCoverForHiddenApp,
+  revealPrivacyCoverWithoutBiometrics,
+  subscribeToPanicHide,
+} from '@/services/privacy-lock';
 
 // Prevent splash screen auto hide
 SplashScreen.preventAutoHideAsync().catch(() => {
@@ -76,6 +85,7 @@ export default function TabLayout() {
         <EntitlementProvider>
           <AIConsentProvider>
             <AnimatedSplashOverlay />
+            <StoreKitRecovery />
 
             <PrivacyGuard>
               <RootContent
@@ -93,39 +103,77 @@ export default function TabLayout() {
 function PrivacyGuard({ children }: { children: ReactNode }) {
   const colorScheme = useColorScheme();
   const { isAuthenticated, logout } = useApp();
-  const [isLocked, setIsLocked] = useState(false);
+  const [coverState, setCoverState] = useState<PrivacyCoverState>({
+    isCovered: true,
+    requiresBiometric: false,
+  });
   const [isUnlocking, setIsUnlocking] = useState(false);
   const [privacyChecked, setPrivacyChecked] = useState(false);
   const unlockInFlight = useRef(false);
 
-  const unlock = useCallback(async () => {
+  const authenticateAndReveal = useCallback(async () => {
     if (!isAuthenticated || unlockInFlight.current) return;
     unlockInFlight.current = true;
     setIsUnlocking(true);
     try {
-      if (await authenticatePrivacyLock()) setIsLocked(false);
+      if (await authenticatePrivacyLock()) {
+        setCoverState({ isCovered: false, requiresBiometric: true });
+      }
+    } catch {
+      // Authentication service errors fail closed; private content stays covered.
     } finally {
       unlockInFlight.current = false;
       setIsUnlocking(false);
     }
   }, [isAuthenticated]);
 
-  useEffect(() => subscribeToPanicHide(() => setIsLocked(true)), []);
+  const reveal = useCallback(() => {
+    if (coverState.requiresBiometric) {
+      void authenticateAndReveal();
+    } else {
+      setCoverState((current) => revealPrivacyCoverWithoutBiometrics(current));
+    }
+  }, [authenticateAndReveal, coverState.requiresBiometric]);
+
+  useEffect(() => {
+    let mounted = true;
+    const unsubscribe = subscribeToPanicHide(() => {
+      setPrivacyChecked(false);
+      setCoverState((current) => privacyCoverForHiddenApp(current.requiresBiometric));
+      void getPrivacyLockEnabled()
+        .then((enabled) => {
+          if (!mounted) return;
+          setCoverState(privacyCoverForHiddenApp(enabled));
+          setPrivacyChecked(true);
+        })
+        .catch(() => {
+          // Secure-storage errors fail closed; Sign Out remains available.
+        });
+    });
+    return () => {
+      mounted = false;
+      unsubscribe();
+    };
+  }, []);
 
   useEffect(() => {
     if (!isAuthenticated) {
-      setIsLocked(false);
+      setCoverState({ isCovered: false, requiresBiometric: false });
       setPrivacyChecked(false);
       return;
     }
 
     let mounted = true;
-    void getPrivacyLockEnabled().then((enabled) => {
-      if (!mounted) return;
-      setIsLocked(enabled);
-      setPrivacyChecked(true);
-      if (enabled) void unlock();
-    });
+    void getPrivacyLockEnabled()
+      .then((enabled) => {
+        if (!mounted) return;
+        setCoverState(privacyCoverForActiveSession(enabled));
+        setPrivacyChecked(true);
+        if (enabled) void authenticateAndReveal();
+      })
+      .catch(() => {
+        // Secure-storage errors fail closed; Sign Out remains available.
+      });
 
     let currentState = AppState.currentState;
     const subscription = AppState.addEventListener('change', async (nextState: AppStateStatus) => {
@@ -133,10 +181,18 @@ function PrivacyGuard({ children }: { children: ReactNode }) {
       currentState = nextState;
 
       if (nextState === 'inactive' || nextState === 'background') {
-        if (await getPrivacyLockEnabled()) setIsLocked(true);
-      } else if (returningToForeground && await getPrivacyLockEnabled()) {
-        setIsLocked(true);
-        void unlock();
+        setCoverState((current) => privacyCoverForHiddenApp(current.requiresBiometric));
+      } else if (returningToForeground) {
+        setPrivacyChecked(false);
+        try {
+          const enabled = await getPrivacyLockEnabled();
+          if (!mounted) return;
+          setCoverState(privacyCoverForHiddenApp(enabled));
+          setPrivacyChecked(true);
+          if (enabled) void authenticateAndReveal();
+        } catch {
+          // Secure-storage errors fail closed; Sign Out remains available.
+        }
       }
     });
 
@@ -144,28 +200,41 @@ function PrivacyGuard({ children }: { children: ReactNode }) {
       mounted = false;
       subscription.remove();
     };
-  }, [isAuthenticated, unlock]);
+  }, [authenticateAndReveal, isAuthenticated]);
 
-  const shouldCoverPrivateContent = isAuthenticated && (!privacyChecked || isLocked);
+  const shouldCoverPrivateContent = isAuthenticated && (!privacyChecked || coverState.isCovered);
 
   return (
     <View style={styles.guardContainer}>
-      {(!isAuthenticated || privacyChecked) && children}
+      <View
+        style={styles.privateContent}
+        pointerEvents={shouldCoverPrivateContent ? 'none' : 'auto'}
+        accessibilityElementsHidden={shouldCoverPrivateContent}
+        importantForAccessibility={shouldCoverPrivateContent ? 'no-hide-descendants' : 'auto'}
+      >
+        {children}
+      </View>
       {shouldCoverPrivateContent && (
         <View style={[
           styles.overlay,
           { backgroundColor: colorScheme === 'dark' ? '#2E2A28' : '#F6F2EF' },
-        ]}>
+        ]} accessibilityViewIsModal>
           <ThemedText type="subtitle" style={styles.overlayText}>NoteBox</ThemedText>
           <ThemedText type="small" themeColor="textSecondary">Private content is hidden.</ThemedText>
           <Pressable
             accessibilityRole="button"
-            accessibilityLabel="Unlock NoteBox"
+            accessibilityLabel={coverState.requiresBiometric ? 'Unlock NoteBox' : 'Reveal NoteBox'}
             disabled={isUnlocking || !privacyChecked}
-            onPress={() => void unlock()}
+            onPress={reveal}
             style={styles.unlockButton}
           >
-            <ThemedText style={styles.unlockButtonText}>{!privacyChecked || isUnlocking ? 'Checking…' : 'Unlock'}</ThemedText>
+            <ThemedText style={styles.unlockButtonText}>
+              {!privacyChecked || isUnlocking
+                ? 'Checking…'
+                : coverState.requiresBiometric
+                  ? 'Unlock'
+                  : 'Reveal'}
+            </ThemedText>
           </Pressable>
           <Pressable accessibilityRole="button" onPress={() => void logout()}>
             <ThemedText type="small" themeColor="textSecondary">Sign Out</ThemedText>
@@ -214,6 +283,9 @@ function RootContent({ isOnboardingCompleted, setIsOnboardingCompleted }: RootCo
 
 const styles = StyleSheet.create({
   guardContainer: {
+    flex: 1,
+  },
+  privateContent: {
     flex: 1,
   },
   overlay: {

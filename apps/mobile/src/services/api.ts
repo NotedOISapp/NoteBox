@@ -44,7 +44,7 @@ export interface PatternInsight {
 
 export interface ExportStatusResponse {
   success: true;
-  status: 'pending' | 'processing' | 'ready' | 'failed';
+  status: 'pending' | 'processing' | 'ready' | 'failed' | 'expired';
   expiresAt?: string;
   generatedAt?: string;
   downloadUrl?: string;
@@ -63,12 +63,12 @@ export interface ReceiptRecord {
   noteId: string;
   contentType: string;
   sizeBytes: string;
-  scanStatus: 'pending' | 'clean' | 'rejected';
+  scanStatus: 'pending' | 'clean' | 'rejected' | 'unavailable';
   createdAt: string;
 }
 
 export type ReceiptOcrResponse =
-  | { receiptId: string; status: 'processing'; stage: 'security_scan'; retryAfterSeconds: number }
+  | { receiptId: string; status: 'processing'; stage: 'security_scan' | 'text_extraction'; retryAfterSeconds: number }
   | { receiptId: string; status: 'blocked'; reason: string }
   | { receiptId: string; status: 'unavailable'; reason: string }
   | { receiptId: string; status: 'ready'; text: string; extractedAt: string };
@@ -76,6 +76,19 @@ export type ReceiptOcrResponse =
 export interface ReceiptUploadAsset {
   uri: string;
   contentType: string;
+}
+
+export interface ReceiptUploadAuthorization {
+  reservationId: string;
+  uploadUrl: string;
+  method: string;
+  headers?: Record<string, string>;
+  expiresAt: string;
+}
+
+export interface ReceiptUploadOptions {
+  authorization?: ReceiptUploadAuthorization;
+  onAuthorization?: (authorization: ReceiptUploadAuthorization) => Promise<void>;
 }
 
 export function resolveApiBaseUrl(configuredUrl?: string, hostUri?: string, isDevelopment = false): string {
@@ -207,20 +220,83 @@ async function apiFetch(endpoint: string, options: RequestInit = {}): Promise<an
   return response.json();
 }
 
-async function uploadReceiptAsset(noteId: string, asset: ReceiptUploadAsset): Promise<ReceiptRecord> {
+async function downloadAuthenticatedExport(endpoint: string): Promise<Uint8Array> {
+  if (!/^\/v1\/privacy\/export-request\/[^/?#]+\/download$/.test(endpoint)) {
+    throw new Error('The export download location is invalid.');
+  }
+  const accessToken = await getAccessToken();
+  const headers: Record<string, string> = {
+    Accept: 'application/zip',
+    ...(accessToken ? { Authorization: `Bearer ${accessToken}` } : {}),
+  };
+  let response = await fetch(`${getApiBaseUrl()}${endpoint}`, { headers });
+  if (response.status === 401 && accessToken && await rotateRefreshToken()) {
+    const nextToken = await getAccessToken();
+    headers.Authorization = `Bearer ${nextToken}`;
+    response = await fetch(`${getApiBaseUrl()}${endpoint}`, { headers });
+  }
+  if (!response.ok) {
+    const errData = await response.json().catch(() => ({}));
+    throw {
+      status: response.status,
+      error: errData.error || 'ApiError',
+      message: errData.message || 'Export download failed',
+    };
+  }
+  return new Uint8Array(await response.arrayBuffer());
+}
+
+function apiErrorCode(error: unknown): string | undefined {
+  return typeof error === 'object' && error !== null && 'error' in error
+    ? String((error as { error?: unknown }).error ?? '')
+    : undefined;
+}
+
+async function confirmReceiptUpload(reservationId: string): Promise<ReceiptRecord> {
+  const confirmation = await apiFetch('/v1/receipts/confirm', {
+    method: 'POST',
+    body: JSON.stringify({ reservationId }),
+  }) as { receipt: ReceiptRecord };
+  return confirmation.receipt;
+}
+
+async function uploadReceiptAsset(
+  noteId: string,
+  asset: ReceiptUploadAsset,
+  options: ReceiptUploadOptions = {},
+): Promise<ReceiptRecord> {
+  let authorization = options.authorization;
+
+  if (authorization) {
+    try {
+      // Confirm first: a prior PUT/confirm may have completed before the queue
+      // checkpoint was removed. Confirmation is idempotent for the reservation.
+      return await confirmReceiptUpload(authorization.reservationId);
+    } catch (error) {
+      const code = apiErrorCode(error);
+      const expired = new Date(authorization.expiresAt).getTime() <= Date.now();
+      if (code === 'STORAGE_OBJECT_NOT_FOUND') {
+        // Authorization is still usable only while its signed upload URL is live.
+        if (expired) authorization = undefined;
+      } else if (['RESERVATION_INVALID', 'RESERVATION_EXPIRED', 'RESERVATION_CONSUMED'].includes(code ?? '')) {
+        authorization = undefined;
+      } else {
+        throw error;
+      }
+    }
+  }
+
   const fileResponse = await fetch(asset.uri);
   const body = await fileResponse.blob();
   if (body.size <= 0) throw new Error('The selected file is empty.');
 
-  const authorization = await apiFetch('/v1/receipts/upload-url', {
-    method: 'POST',
-    body: JSON.stringify({ noteId, contentType: asset.contentType, sizeBytes: body.size }),
-  }) as {
-    reservationId: string;
-    uploadUrl: string;
-    method: string;
-    headers?: Record<string, string>;
-  };
+  if (!authorization) {
+    authorization = await apiFetch('/v1/receipts/upload-url', {
+      method: 'POST',
+      body: JSON.stringify({ noteId, contentType: asset.contentType, sizeBytes: body.size }),
+    }) as ReceiptUploadAuthorization;
+    await options.onAuthorization?.(authorization);
+  }
 
   const isExternalUrl = /^https?:\/\//i.test(authorization.uploadUrl);
   const uploadUrl = isExternalUrl ? authorization.uploadUrl : `${getApiBaseUrl()}${authorization.uploadUrl}`;
@@ -240,14 +316,14 @@ async function uploadReceiptAsset(noteId: string, asset: ReceiptUploadAsset): Pr
   });
   if (!uploadResponse.ok) {
     const errorBody = await uploadResponse.json().catch(() => ({}));
-    throw new Error(errorBody.message || errorBody.error || 'Receipt upload failed.');
+    throw {
+      status: uploadResponse.status,
+      error: errorBody.error || 'RECEIPT_UPLOAD_FAILED',
+      message: errorBody.message || 'Receipt upload failed.',
+    };
   }
 
-  const confirmation = await apiFetch('/v1/receipts/confirm', {
-    method: 'POST',
-    body: JSON.stringify({ reservationId: authorization.reservationId }),
-  }) as { receipt: ReceiptRecord };
-  return confirmation.receipt;
+  return confirmReceiptUpload(authorization.reservationId);
 }
 
 // ── API Operations ──────────────────────────────────────────────────────────
@@ -353,6 +429,7 @@ export const api = {
     list: (noteId: string): Promise<ReceiptRecord[]> =>
       apiFetch(`/v1/receipts?noteId=${encodeURIComponent(noteId)}`),
     upload: uploadReceiptAsset,
+    confirm: confirmReceiptUpload,
     delete: (receiptId: string): Promise<{ success: true }> =>
       apiFetch(`/v1/receipts/${encodeURIComponent(receiptId)}`, { method: 'DELETE' }),
     getOcr: (receiptId: string): Promise<ReceiptOcrResponse> =>
@@ -386,10 +463,15 @@ export const api = {
   },
 
   perspectives: {
-    generate: (noteId: string, intensity?: string, scope?: string) =>
+    generate: (
+      noteId: string,
+      intensity?: string,
+      scope?: string,
+      options: { useReceipts?: boolean } = {},
+    ) =>
       apiFetch(`/v1/notes/${noteId}/perspectives`, {
         method: 'POST',
-        body: JSON.stringify({ intensity, scope })
+        body: JSON.stringify({ intensity, scope, useReceipts: options.useReceipts === true })
       }),
     get: (noteId: string) => apiFetch(`/v1/notes/${noteId}/perspectives`),
   },
@@ -407,6 +489,8 @@ export const api = {
     requestDataExport: () => apiFetch('/v1/privacy/export-request', { method: 'POST', body: JSON.stringify({ format: 'zip' }) }),
 
     getDataExportStatus: (ticketId: string): Promise<ExportStatusResponse> => apiFetch(`/v1/privacy/export-request/${encodeURIComponent(ticketId)}`),
+
+    downloadDataExport: (downloadUrl: string): Promise<Uint8Array> => downloadAuthenticatedExport(downloadUrl),
 
     fileDSAR: (requestType: string) =>
       apiFetch('/v1/privacy/request', {

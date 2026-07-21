@@ -44,6 +44,8 @@ import { ZipArchive, TarArchive } from 'archiver';
 import { PassThrough } from 'stream';
 import { decrypt } from './utils/crypto.js';
 import { logInfo, logWarn, logError } from './utils/logger.js';
+import { processPendingReceiptJobs } from './services/receiptProcessingWorker.js';
+import { assertReceiptObjectsExportable } from './services/receiptExportIntegrity.js';
 
 /**
  * Seeds default retention policies into the database on startup if they don't exist
@@ -202,6 +204,7 @@ export async function processPendingExports() {
 
       // 3. Set up output streaming directly to Private Storage Adapter
       const storage = getStorage();
+      await assertReceiptObjectsExportable(storage, userReceipts);
       const passThrough = new PassThrough();
       const archive = new ZipArchive({ zlib: { level: 9 } });
       archive.pipe(passThrough);
@@ -294,14 +297,8 @@ export async function processPendingExports() {
 
       for (const receipt of userReceipts) {
         if (receipt.storageKey) {
-          try {
-            if (await storage.objectExists('receipts', receipt.storageKey)) {
-              const stream = await storage.openObject('receipts', receipt.storageKey);
-              archive.append(stream as any, { name: `media/receipts/${receipt.storageKey}` });
-            }
-          } catch (err) {
-            logWarn('Receipt file missing during export packaging', { receiptId: receipt.id, key: receipt.storageKey });
-          }
+          const stream = await storage.openObject('receipts', receipt.storageKey, receipt.providerObjectVersion);
+          archive.append(stream as any, { name: `media/receipts/${receipt.storageKey}` });
         }
       }
 
@@ -556,9 +553,10 @@ export function startRetentionCron() {
   // Run initial policy seeding
   seedDefaultRetentionPolicies();
 
-  // Run background workers every 1 minute for data exports and deletion jobs
+  // Run durable background workers every minute.
   cron.schedule('*/1 * * * *', async () => {
     try {
+      await processPendingReceiptJobs();
       await processPendingExports();
       await processDeletionJobs();
     } catch (error) {

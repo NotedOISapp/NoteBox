@@ -29,17 +29,21 @@ vi.mock('expo-crypto', () => ({
 
 import {
   SecureLocalDataError,
+  decryptLocalFileBytes,
+  encryptLocalFileBytes,
   getEncryptedItem,
   getEncryptedJson,
   setEncryptedItem,
   setEncryptedJson,
 } from '@/services/secure-local-storage';
+import * as Crypto from 'expo-crypto';
 
 describe('encrypted local storage', () => {
   beforeEach(() => {
     asyncValues.clear();
     secureValues.clear();
     randomSeed = 1;
+    vi.clearAllMocks();
   });
 
   it('stores authenticated ciphertext instead of plaintext and decrypts it', async () => {
@@ -74,5 +78,25 @@ describe('encrypted local storage', () => {
     asyncValues.set('second-key', asyncValues.get('first-key')!);
 
     await expect(getEncryptedItem('second-key')).rejects.toBeInstanceOf(SecureLocalDataError);
+  });
+
+  it('initializes one encryption key when concurrent first writes race', async () => {
+    await Promise.all([
+      setEncryptedItem('first', 'one'),
+      setEncryptedItem('second', 'two'),
+    ]);
+
+    expect(Crypto.getRandomBytesAsync).toHaveBeenCalledTimes(3);
+    expect(await getEncryptedItem('first')).toBe('one');
+    expect(await getEncryptedItem('second')).toBe('two');
+  });
+
+  it('encrypts queued attachment bytes and binds them to their mutation', async () => {
+    const plaintext = new Uint8Array([1, 2, 3, 4, 5]);
+    const envelope = await encryptLocalFileBytes('receipt-upload:m1', plaintext);
+
+    expect(envelope).not.toEqual(plaintext);
+    await expect(decryptLocalFileBytes('receipt-upload:m2', envelope)).rejects.toBeInstanceOf(SecureLocalDataError);
+    expect(await decryptLocalFileBytes('receipt-upload:m1', envelope)).toEqual(plaintext);
   });
 });

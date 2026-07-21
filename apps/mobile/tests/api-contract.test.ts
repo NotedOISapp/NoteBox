@@ -122,4 +122,70 @@ describe('mobile API contract', () => {
     expect(String(fetchMock.mock.calls[0][0])).toContain('/v1/entitlements/me');
     expect((fetchMock.mock.calls[0][1]?.headers as Record<string, string>).Authorization).toBe('Bearer access');
   });
+
+  it('keeps extracted Receipt text out of Perspective requests unless explicitly enabled', async () => {
+    secureValues.set('access_token', 'access');
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation(async () => new Response(JSON.stringify({
+      perspectives: [],
+    }), { status: 200, headers: { 'Content-Type': 'application/json' } }));
+
+    await api.perspectives.generate('note-1', 'bold', 'single_note');
+    await api.perspectives.generate('note-1', 'bold', 'single_note', { useReceipts: true });
+
+    expect(JSON.parse(String(fetchMock.mock.calls[0][1]?.body))).toMatchObject({ useReceipts: false });
+    expect(JSON.parse(String(fetchMock.mock.calls[1][1]?.body))).toMatchObject({ useReceipts: true });
+  });
+
+  it('resumes a confirmed Receipt reservation without uploading the file twice', async () => {
+    secureValues.set('access_token', 'access');
+    const receipt = {
+      id: 'receipt-1', noteId: 'note-1', contentType: 'application/pdf', sizeBytes: '12', scanStatus: 'pending', createdAt: 'now',
+    };
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(JSON.stringify({ receipt }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    }));
+
+    await expect(api.receipts.upload('note-1', {
+      uri: 'file:///should-not-be-read.pdf',
+      contentType: 'application/pdf',
+    }, {
+      authorization: {
+        reservationId: 'reservation-1',
+        uploadUrl: '/v1/receipts/upload/reservation-1',
+        method: 'PUT',
+        expiresAt: '2099-01-01T00:00:00.000Z',
+      },
+    })).resolves.toMatchObject({ id: 'receipt-1' });
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(String(fetchMock.mock.calls[0][0])).toContain('/v1/receipts/confirm');
+  });
+
+  it('uses the canonical OCR-only deletion route without deleting the Receipt', async () => {
+    secureValues.set('access_token', 'access');
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(JSON.stringify({ success: true }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    }));
+
+    await api.receipts.deleteOcr('receipt-1');
+
+    expect(String(fetchMock.mock.calls[0][0])).toContain('/v1/receipts/receipt-1/ocr');
+    expect(fetchMock.mock.calls[0][1]?.method).toBe('DELETE');
+  });
+
+  it('downloads only a canonical export URL with authenticated ZIP bytes', async () => {
+    secureValues.set('access_token', 'access');
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(new Uint8Array([80, 75, 3, 4]), {
+      status: 200,
+      headers: { 'Content-Type': 'application/zip' },
+    }));
+
+    await expect(api.compliance.downloadDataExport('/v1/privacy/export-request/ticket-1/download'))
+      .resolves.toEqual(new Uint8Array([80, 75, 3, 4]));
+    expect((fetchMock.mock.calls[0][1]?.headers as Record<string, string>).Authorization).toBe('Bearer access');
+    await expect(api.compliance.downloadDataExport('https://attacker.example/export.zip'))
+      .rejects.toThrow('invalid');
+  });
 });

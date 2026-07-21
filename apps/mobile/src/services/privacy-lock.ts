@@ -5,6 +5,30 @@ import { Platform } from 'react-native';
 const PRIVACY_LOCK_KEY = 'notebox_privacy_lock_enabled';
 const panicListeners = new Set<() => void>();
 
+export interface PrivacyCoverState {
+  isCovered: boolean;
+  requiresBiometric: boolean;
+}
+
+export function privacyCoverForActiveSession(biometricLockEnabled: boolean): PrivacyCoverState {
+  return {
+    isCovered: biometricLockEnabled,
+    requiresBiometric: biometricLockEnabled,
+  };
+}
+
+export function privacyCoverForHiddenApp(biometricLockEnabled: boolean): PrivacyCoverState {
+  return {
+    isCovered: true,
+    requiresBiometric: biometricLockEnabled,
+  };
+}
+
+export function revealPrivacyCoverWithoutBiometrics(state: PrivacyCoverState): PrivacyCoverState {
+  if (state.requiresBiometric) return state;
+  return { isCovered: false, requiresBiometric: false };
+}
+
 export async function getPrivacyLockEnabled(): Promise<boolean> {
   if (Platform.OS === 'web') return false;
   return await SecureStore.getItemAsync(PRIVACY_LOCK_KEY) === 'true';

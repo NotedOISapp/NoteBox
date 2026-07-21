@@ -9,6 +9,12 @@ export interface StoreKitPurchase {
 export interface StoreKitProduct {
   id: string;
   displayPrice?: string;
+  displayName?: string | null;
+  title?: string | null;
+  description?: string | null;
+  subscriptionPeriodNumberIOS?: string | null;
+  subscriptionPeriodUnitIOS?: string | null;
+  introductoryPricePaymentModeIOS?: string | null;
 }
 
 export interface StoreKitPurchaseError {
@@ -28,6 +34,7 @@ export interface StoreKitAdapter {
   getAvailablePurchases: (options: {
     onlyIncludeActiveItemsIOS: boolean;
   }) => Promise<StoreKitPurchase[]>;
+  getPendingTransactionsIOS: () => Promise<StoreKitPurchase[]>;
   finishTransaction: (request: {
     purchase: StoreKitPurchase;
     isConsumable: false;
@@ -41,6 +48,12 @@ export interface StoreKitAdapter {
 }
 
 interface EntitlementSyncResult {
+  claimed?: {
+    transactionId?: string | null;
+    productId?: string | null;
+    status?: 'created' | 'already_claimed' | 'rejected';
+    errorCode?: string;
+  }[];
   entitlement?: {
     hasProAccess?: boolean;
   };
@@ -54,8 +67,10 @@ interface StoreKitServiceOptions {
 }
 
 export interface StoreKitService {
+  getProduct: () => Promise<StoreKitProduct>;
   purchase: () => Promise<{ purchase: StoreKitPurchase }>;
   restore: () => Promise<{ restoredCount: number }>;
+  recover: () => Promise<{ restoredCount: number }>;
 }
 
 export class StoreKitServiceError extends Error {
@@ -87,6 +102,28 @@ function signedTransactionFor(purchase: StoreKitPurchase): string {
   return signedTransaction;
 }
 
+function transactionIdFor(purchase: StoreKitPurchase): string {
+  const transactionId = purchase.transactionId?.trim();
+  if (!transactionId) {
+    throw new StoreKitServiceError(
+      'Apple did not provide a transaction identifier for backend ownership verification.',
+      'missing-transaction-id',
+    );
+  }
+  return transactionId;
+}
+
+function requireAvailableProduct(products: StoreKitProduct[], productId: string): StoreKitProduct {
+  const product = products.find((candidate) => candidate.id === productId);
+  if (!product) {
+    throw new StoreKitServiceError(
+      'The NoteBox subscription is not available from the App Store.',
+      'product-unavailable',
+    );
+  }
+  return product;
+}
+
 function requireAppAccountToken(token: string): string {
   const normalized = token.trim().toLowerCase();
   if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(normalized)) {
@@ -103,8 +140,23 @@ async function verifyAndFinish(
   syncTransactions: StoreKitServiceOptions['syncTransactions'],
   purchases: StoreKitPurchase[],
 ): Promise<void> {
+  const transactionIds = purchases.map(transactionIdFor);
   const signedTransactions = [...new Set(purchases.map(signedTransactionFor))];
   const result = await syncTransactions(signedTransactions);
+  const acceptedStatuses = new Set(['created', 'already_claimed']);
+  const everyTransactionAccepted = purchases.every((purchase, index) =>
+    result.claimed?.some((claim) =>
+      claim.transactionId === transactionIds[index]
+      && claim.productId === purchase.productId
+      && acceptedStatuses.has(claim.status ?? ''),
+    ),
+  );
+  if (!everyTransactionAccepted) {
+    throw new StoreKitServiceError(
+      'The backend did not accept the exact StoreKit transaction for this account. It remains unfinished for a safe retry.',
+      'transaction-claim-not-accepted',
+    );
+  }
   if (result.entitlement?.hasProAccess !== true) {
     throw new StoreKitServiceError(
       'The backend did not verify paid access. The StoreKit transaction remains unfinished for a safe retry.',
@@ -126,6 +178,18 @@ export function createStoreKitService({
   const productId = requireProductId(configuredProductId);
 
   return {
+    async getProduct() {
+      await adapter.initConnection();
+      try {
+        return requireAvailableProduct(
+          await adapter.fetchProducts({ skus: [productId], type: 'subs' }),
+          productId,
+        );
+      } finally {
+        await adapter.endConnection();
+      }
+    },
+
     async purchase() {
       const appAccountToken = requireAppAccountToken(await getAppAccountToken());
       await adapter.initConnection();
@@ -133,13 +197,10 @@ export function createStoreKitService({
       let purchaseError: StoreKitSubscription | undefined;
 
       try {
-        const products = await adapter.fetchProducts({ skus: [productId], type: 'subs' });
-        if (!products.some((product) => product.id === productId)) {
-          throw new StoreKitServiceError(
-            'The NoteBox subscription is not available from the App Store.',
-            'product-unavailable',
-          );
-        }
+        requireAvailableProduct(
+          await adapter.fetchProducts({ skus: [productId], type: 'subs' }),
+          productId,
+        );
 
         return await new Promise<{ purchase: StoreKitPurchase }>((resolve, reject) => {
           let settled = false;
@@ -192,6 +253,20 @@ export function createStoreKitService({
         await adapter.endConnection();
       }
     },
+
+    async recover() {
+      await adapter.initConnection();
+      try {
+        const purchases = await adapter.getPendingTransactionsIOS();
+        const matchingPurchases = purchases.filter((purchase) => purchase.productId === productId);
+        if (matchingPurchases.length === 0) return { restoredCount: 0 };
+
+        await verifyAndFinish(adapter, syncTransactions, matchingPurchases);
+        return { restoredCount: matchingPurchases.length };
+      } finally {
+        await adapter.endConnection();
+      }
+    },
   };
 }
 
@@ -212,6 +287,8 @@ async function createNativeAdapter(): Promise<StoreKitAdapter> {
     requestPurchase: native.requestPurchase,
     getAvailablePurchases: (options) =>
       native.getAvailablePurchases(options) as Promise<StoreKitPurchase[]>,
+    getPendingTransactionsIOS: () =>
+      native.getPendingTransactionsIOS() as Promise<StoreKitPurchase[]>,
     finishTransaction: (request) => native.finishTransaction(request as never),
     purchaseUpdatedListener: (listener) => native.purchaseUpdatedListener(listener as never),
     purchaseErrorListener: (listener) => native.purchaseErrorListener(listener as never),
@@ -228,12 +305,37 @@ async function nativeService(): Promise<StoreKitService> {
   });
 }
 
+let nativeOperation: Promise<void> = Promise.resolve();
+
+function serializeNativeOperation<T>(operation: () => Promise<T>): Promise<T> {
+  const result = nativeOperation.then(operation, operation);
+  nativeOperation = result.then(() => undefined, () => undefined);
+  return result;
+}
+
 export async function purchaseNoteBoxSubscription() {
-  return (await nativeService()).purchase();
+  return serializeNativeOperation(async () => (await nativeService()).purchase());
 }
 
 export async function restoreNoteBoxSubscription() {
-  return (await nativeService()).restore();
+  return serializeNativeOperation(async () => (await nativeService()).restore());
+}
+
+export async function recoverNoteBoxTransactions() {
+  return serializeNativeOperation(async () => (await nativeService()).recover());
+}
+
+export async function loadNoteBoxSubscriptionProduct() {
+  return serializeNativeOperation(async () => (await nativeService()).getProduct());
+}
+
+export function subscriptionPeriodLabel(product: StoreKitProduct): string {
+  const count = Number.parseInt(product.subscriptionPeriodNumberIOS ?? '', 10);
+  const unit = product.subscriptionPeriodUnitIOS?.toLowerCase();
+  if (!Number.isFinite(count) || count < 1 || !unit || !['day', 'week', 'month', 'year'].includes(unit)) {
+    return 'subscription period shown by Apple';
+  }
+  return count === 1 ? `per ${unit}` : `every ${count} ${unit}s`;
 }
 
 export function isStoreKitUserCancellation(error: unknown): boolean {

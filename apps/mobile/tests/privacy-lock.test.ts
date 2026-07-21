@@ -23,6 +23,9 @@ vi.mock('expo-local-authentication', () => ({
 import {
   authenticatePrivacyLock,
   getPrivacyLockEnabled,
+  privacyCoverForActiveSession,
+  privacyCoverForHiddenApp,
+  revealPrivacyCoverWithoutBiometrics,
   setPrivacyLockEnabled,
   subscribeToPanicHide,
   triggerPanicHide,
@@ -56,5 +59,21 @@ describe('privacy lock service', () => {
     unsubscribe();
     triggerPanicHide();
     expect(listener).toHaveBeenCalledTimes(1);
+  });
+
+  it('universally covers private content on background and allows one-tap reveal without biometric lock', () => {
+    const hidden = privacyCoverForHiddenApp(false);
+    expect(hidden).toEqual({ isCovered: true, requiresBiometric: false });
+    expect(revealPrivacyCoverWithoutBiometrics(hidden)).toEqual({
+      isCovered: false,
+      requiresBiometric: false,
+    });
+  });
+
+  it('keeps biometric sessions covered until device authentication succeeds', () => {
+    const active = privacyCoverForActiveSession(true);
+    const hidden = privacyCoverForHiddenApp(true);
+    expect(active).toEqual({ isCovered: true, requiresBiometric: true });
+    expect(revealPrivacyCoverWithoutBiometrics(hidden)).toEqual(hidden);
   });
 });

@@ -11,7 +11,10 @@ import {
   HeadObjectCommand,
   GetPublicAccessBlockCommand,
   GetBucketEncryptionCommand,
-  ListObjectsV2Command
+  GetBucketVersioningCommand,
+  ListObjectsV2Command,
+  ListObjectVersionsCommand,
+  DeleteObjectsCommand,
 } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 
@@ -22,6 +25,7 @@ export interface PutObjectInput {
   key: string;
   stream: NodeJS.ReadableStream | Buffer;
   contentType: string;
+  ifNoneMatch?: '*';
 }
 
 export interface StoredObject {
@@ -49,10 +53,10 @@ export interface UploadAuthorization {
 
 export interface PrivateStorageAdapter {
   putObject(input: PutObjectInput): Promise<StoredObject>;
-  openObject(namespace: StorageNamespace, key: string): Promise<NodeJS.ReadableStream>;
-  deleteObject(namespace: StorageNamespace, key: string): Promise<void>;
+  openObject(namespace: StorageNamespace, key: string, versionId?: string | null): Promise<NodeJS.ReadableStream>;
+  deleteObject(namespace: StorageNamespace, key: string, versionId?: string | null): Promise<void>;
   objectExists(namespace: StorageNamespace, key: string): Promise<boolean>;
-  getObjectMetadata(namespace: StorageNamespace, key: string): Promise<ObjectMetadata>;
+  getObjectMetadata(namespace: StorageNamespace, key: string, versionId?: string | null): Promise<ObjectMetadata>;
   createUploadAuthorization(input: {
     namespace: StorageNamespace;
     key: string;
@@ -62,6 +66,15 @@ export interface PrivateStorageAdapter {
     expiresInSeconds: number;
   }): Promise<UploadAuthorization>;
   listObjects(namespace: StorageNamespace, prefix?: string): Promise<string[]>;
+}
+
+export class StorageObjectAlreadyExistsError extends Error {
+  readonly code = 'STORAGE_OBJECT_ALREADY_EXISTS';
+
+  constructor() {
+    super('STORAGE_OBJECT_ALREADY_EXISTS');
+    this.name = 'StorageObjectAlreadyExistsError';
+  }
 }
 
 // Helper to convert readable stream to Buffer
@@ -78,24 +91,37 @@ export async function streamToBuffer(stream: NodeJS.ReadableStream | Buffer): Pr
 
 // 1. In-Memory Adapter (for Testing)
 export class InMemoryStorageAdapter implements PrivateStorageAdapter {
-  private store = new Map<string, { buffer: Buffer; contentType: string }>();
+  private store = new Map<string, {
+    currentVersionId: string;
+    versions: Map<string, { buffer: Buffer; contentType: string }>;
+  }>();
 
   async putObject(input: PutObjectInput): Promise<StoredObject> {
     const buffer = await streamToBuffer(input.stream);
     const storeKey = `${input.namespace}/${input.key}`;
-    this.store.set(storeKey, { buffer, contentType: input.contentType });
+    const existing = this.store.get(storeKey);
+    if (input.ifNoneMatch === '*' && existing) {
+      throw new StorageObjectAlreadyExistsError();
+    }
+    const versionId = crypto.randomUUID();
+    const versions = existing?.versions ?? new Map<string, { buffer: Buffer; contentType: string }>();
+    versions.set(versionId, { buffer, contentType: input.contentType });
+    this.store.set(storeKey, { currentVersionId: versionId, versions });
     const sha256 = crypto.createHash('sha256').update(buffer).digest('hex');
     return {
       namespace: input.namespace,
       key: input.key,
       sizeBytes: buffer.length,
       sha256,
+      contentType: input.contentType,
+      versionId,
     };
   }
 
-  async openObject(namespace: StorageNamespace, key: string): Promise<NodeJS.ReadableStream> {
+  async openObject(namespace: StorageNamespace, key: string, versionId?: string | null): Promise<NodeJS.ReadableStream> {
     const storeKey = `${namespace}/${key}`;
-    const file = this.store.get(storeKey);
+    const stored = this.store.get(storeKey);
+    const file = stored?.versions.get(versionId || stored.currentVersionId);
     if (!file) {
       throw new Error(`File not found in Memory Storage: ${storeKey}`);
     }
@@ -105,9 +131,19 @@ export class InMemoryStorageAdapter implements PrivateStorageAdapter {
     return stream;
   }
 
-  async deleteObject(namespace: StorageNamespace, key: string): Promise<void> {
+  async deleteObject(namespace: StorageNamespace, key: string, versionId?: string | null): Promise<void> {
     const storeKey = `${namespace}/${key}`;
-    this.store.delete(storeKey);
+    const stored = this.store.get(storeKey);
+    if (!stored || !versionId) {
+      this.store.delete(storeKey);
+      return;
+    }
+    stored.versions.delete(versionId);
+    if (stored.versions.size === 0) {
+      this.store.delete(storeKey);
+    } else if (stored.currentVersionId === versionId) {
+      stored.currentVersionId = Array.from(stored.versions.keys()).at(-1)!;
+    }
   }
 
   async objectExists(namespace: StorageNamespace, key: string): Promise<boolean> {
@@ -115,14 +151,16 @@ export class InMemoryStorageAdapter implements PrivateStorageAdapter {
     return this.store.has(storeKey);
   }
 
-  async getObjectMetadata(namespace: StorageNamespace, key: string): Promise<ObjectMetadata> {
-    const file = this.store.get(`${namespace}/${key}`);
+  async getObjectMetadata(namespace: StorageNamespace, key: string, versionId?: string | null): Promise<ObjectMetadata> {
+    const stored = this.store.get(`${namespace}/${key}`);
+    const resolvedVersionId = versionId || stored?.currentVersionId;
+    const file = resolvedVersionId ? stored?.versions.get(resolvedVersionId) : undefined;
     if (!file) throw new Error('STORAGE_OBJECT_NOT_FOUND');
     return {
       sizeBytes: file.buffer.length,
       contentType: file.contentType,
       sha256: crypto.createHash('sha256').update(file.buffer).digest('hex'),
-      versionId: null,
+      versionId: resolvedVersionId || null,
     };
   }
 
@@ -130,7 +168,12 @@ export class InMemoryStorageAdapter implements PrivateStorageAdapter {
     return {
       url: `memory://${input.namespace}/${input.key}`,
       method: 'PUT',
-      headers: { 'content-type': input.contentType, ...(input.sha256 ? { 'x-notebox-sha256': input.sha256 } : {}) },
+      headers: {
+        'content-type': input.contentType,
+        'content-length': String(input.maxSizeBytes),
+        'if-none-match': '*',
+        ...(input.sha256 ? { 'x-notebox-sha256': input.sha256 } : {}),
+      },
       expiresAt: new Date(Date.now() + input.expiresInSeconds * 1000),
     };
   }
@@ -163,6 +206,19 @@ export class LocalDiskStorageAdapter implements PrivateStorageAdapter {
     return path.join(this.baseDir, namespace, safeKey);
   }
 
+  private getVersionPath(namespace: StorageNamespace, key: string, versionId: string): string {
+    const safeVersionId = versionId.replace(/[^a-zA-Z0-9-]/g, '');
+    return path.join(this.baseDir, '.versions', namespace, key.replace(/\.\./g, ''), safeVersionId);
+  }
+
+  private getVersionDirectory(namespace: StorageNamespace, key: string): string {
+    return path.join(this.baseDir, '.versions', namespace, key.replace(/\.\./g, ''));
+  }
+
+  private getMetadataPath(filePath: string): string {
+    return `${filePath}.metadata.json`;
+  }
+
   async putObject(input: PutObjectInput): Promise<StoredObject> {
     const filePath = this.getPath(input.namespace, input.key);
     const dir = path.dirname(filePath);
@@ -171,29 +227,55 @@ export class LocalDiskStorageAdapter implements PrivateStorageAdapter {
     }
 
     const buffer = await streamToBuffer(input.stream);
-    fs.writeFileSync(filePath, buffer);
-
     const sha256 = crypto.createHash('sha256').update(buffer).digest('hex');
+    const versionId = crypto.randomUUID();
+    if (input.ifNoneMatch === '*' && fs.existsSync(filePath)) {
+      throw new StorageObjectAlreadyExistsError();
+    }
+    fs.writeFileSync(filePath, buffer, input.ifNoneMatch === '*' ? { flag: 'wx' } : undefined);
+    const versionPath = this.getVersionPath(input.namespace, input.key, versionId);
+    fs.mkdirSync(path.dirname(versionPath), { recursive: true });
+    fs.writeFileSync(versionPath, buffer, { flag: 'wx' });
+    const metadata = JSON.stringify({ contentType: input.contentType, sha256, versionId });
+    fs.writeFileSync(this.getMetadataPath(filePath), metadata);
+    fs.writeFileSync(this.getMetadataPath(versionPath), metadata, { flag: 'wx' });
+
     return {
       namespace: input.namespace,
       key: input.key,
       sizeBytes: buffer.length,
       sha256,
+      contentType: input.contentType,
+      versionId,
     };
   }
 
-  async openObject(namespace: StorageNamespace, key: string): Promise<NodeJS.ReadableStream> {
-    const filePath = this.getPath(namespace, key);
+  async openObject(namespace: StorageNamespace, key: string, versionId?: string | null): Promise<NodeJS.ReadableStream> {
+    const filePath = versionId ? this.getVersionPath(namespace, key, versionId) : this.getPath(namespace, key);
     if (!fs.existsSync(filePath)) {
       throw new Error(`File not found in Local Storage: ${namespace}/${key}`);
     }
     return fs.createReadStream(filePath);
   }
 
-  async deleteObject(namespace: StorageNamespace, key: string): Promise<void> {
-    const filePath = this.getPath(namespace, key);
+  async deleteObject(namespace: StorageNamespace, key: string, versionId?: string | null): Promise<void> {
+    const currentPath = this.getPath(namespace, key);
+    const filePath = versionId ? this.getVersionPath(namespace, key, versionId) : currentPath;
     if (fs.existsSync(filePath)) {
       fs.unlinkSync(filePath);
+    }
+    const metadataPath = this.getMetadataPath(filePath);
+    if (fs.existsSync(metadataPath)) fs.unlinkSync(metadataPath);
+    if (versionId && fs.existsSync(this.getMetadataPath(currentPath))) {
+      const current = JSON.parse(fs.readFileSync(this.getMetadataPath(currentPath), 'utf8')) as { versionId?: string };
+      if (current.versionId === versionId) {
+        fs.unlinkSync(currentPath);
+        fs.unlinkSync(this.getMetadataPath(currentPath));
+      }
+    }
+    if (!versionId) {
+      const versionDirectory = this.getVersionDirectory(namespace, key);
+      if (fs.existsSync(versionDirectory)) fs.rmSync(versionDirectory, { recursive: true, force: true });
     }
   }
 
@@ -202,15 +284,22 @@ export class LocalDiskStorageAdapter implements PrivateStorageAdapter {
     return fs.existsSync(filePath);
   }
 
-  async getObjectMetadata(namespace: StorageNamespace, key: string): Promise<ObjectMetadata> {
-    const filePath = this.getPath(namespace, key);
+  async getObjectMetadata(namespace: StorageNamespace, key: string, versionId?: string | null): Promise<ObjectMetadata> {
+    const filePath = versionId ? this.getVersionPath(namespace, key, versionId) : this.getPath(namespace, key);
     if (!fs.existsSync(filePath)) throw new Error('STORAGE_OBJECT_NOT_FOUND');
     const buffer = fs.readFileSync(filePath);
+    const metadataPath = this.getMetadataPath(filePath);
+    if (!fs.existsSync(metadataPath)) throw new Error('STORAGE_OBJECT_METADATA_INVALID');
+    const metadata = JSON.parse(fs.readFileSync(metadataPath, 'utf8')) as {
+      contentType: string;
+      sha256: string;
+      versionId: string;
+    };
     return {
       sizeBytes: buffer.length,
-      contentType: 'application/octet-stream',
+      contentType: metadata.contentType,
       sha256: crypto.createHash('sha256').update(buffer).digest('hex'),
-      versionId: null,
+      versionId: metadata.versionId,
     };
   }
 
@@ -218,7 +307,12 @@ export class LocalDiskStorageAdapter implements PrivateStorageAdapter {
     return {
       url: `local://${input.namespace}/${input.key}`,
       method: 'PUT',
-      headers: { 'content-type': input.contentType, ...(input.sha256 ? { 'x-notebox-sha256': input.sha256 } : {}) },
+      headers: {
+        'content-type': input.contentType,
+        'content-length': String(input.maxSizeBytes),
+        'if-none-match': '*',
+        ...(input.sha256 ? { 'x-notebox-sha256': input.sha256 } : {}),
+      },
       expiresAt: new Date(Date.now() + input.expiresInSeconds * 1000),
     };
   }
@@ -266,17 +360,22 @@ export class S3StorageAdapter implements PrivateStorageAdapter {
     return `${namespace}/${key}`;
   }
 
+  protected presignUpload(command: PutObjectCommand, expiresInSeconds: number): Promise<string> {
+    return getSignedUrl(this.client, command, { expiresIn: expiresInSeconds });
+  }
+
   async putObject(input: PutObjectInput): Promise<StoredObject> {
     const s3Key = this.getS3Key(input.namespace, input.key);
     const buffer = await streamToBuffer(input.stream);
     const sha256 = crypto.createHash('sha256').update(buffer).digest('hex');
 
-    await this.client.send(new PutObjectCommand({
+    const response = await this.client.send(new PutObjectCommand({
       Bucket: this.bucketName,
       Key: s3Key,
       Body: buffer,
       ContentType: input.contentType,
       ServerSideEncryption: 'AES256',
+      ...(input.ifNoneMatch ? { IfNoneMatch: input.ifNoneMatch } : {}),
     }));
 
     return {
@@ -284,14 +383,17 @@ export class S3StorageAdapter implements PrivateStorageAdapter {
       key: input.key,
       sizeBytes: buffer.length,
       sha256,
+      contentType: input.contentType,
+      versionId: response.VersionId || null,
     };
   }
 
-  async openObject(namespace: StorageNamespace, key: string): Promise<NodeJS.ReadableStream> {
+  async openObject(namespace: StorageNamespace, key: string, versionId?: string | null): Promise<NodeJS.ReadableStream> {
     const s3Key = this.getS3Key(namespace, key);
     const res = await this.client.send(new GetObjectCommand({
       Bucket: this.bucketName,
       Key: s3Key,
+      ...(versionId ? { VersionId: versionId } : {}),
     }));
     if (!res.Body) {
       throw new Error(`S3 GetObject returned empty body for key ${s3Key}`);
@@ -299,11 +401,48 @@ export class S3StorageAdapter implements PrivateStorageAdapter {
     return res.Body as NodeJS.ReadableStream;
   }
 
-  async deleteObject(namespace: StorageNamespace, key: string): Promise<void> {
+  async deleteObject(namespace: StorageNamespace, key: string, versionId?: string | null): Promise<void> {
     const s3Key = this.getS3Key(namespace, key);
+    if (!versionId) {
+      for (let purgePass = 0; purgePass < 10; purgePass++) {
+        const identifiers: Array<{ Key: string; VersionId: string }> = [];
+        let keyMarker: string | undefined;
+        let versionIdMarker: string | undefined;
+        do {
+          const listed = await this.client.send(new ListObjectVersionsCommand({
+            Bucket: this.bucketName,
+            Prefix: s3Key,
+            KeyMarker: keyMarker,
+            VersionIdMarker: versionIdMarker,
+          }));
+          for (const item of [...(listed.Versions || []), ...(listed.DeleteMarkers || [])]) {
+            if (item.Key === s3Key && item.VersionId) {
+              identifiers.push({ Key: s3Key, VersionId: item.VersionId });
+            }
+          }
+          keyMarker = listed.NextKeyMarker;
+          versionIdMarker = listed.NextVersionIdMarker;
+          if (!listed.IsTruncated) break;
+          if (!keyMarker && !versionIdMarker) throw new Error('S3_VERSION_PURGE_PAGINATION_INVALID');
+        } while (keyMarker || versionIdMarker);
+
+        if (identifiers.length === 0) return;
+        for (let offset = 0; offset < identifiers.length; offset += 1000) {
+          const response = await this.client.send(new DeleteObjectsCommand({
+            Bucket: this.bucketName,
+            Delete: { Objects: identifiers.slice(offset, offset + 1000), Quiet: true },
+          }));
+          if (response.Errors?.length) {
+            throw new Error(`S3_VERSION_PURGE_FAILED:${response.Errors.map((item) => item.Code || 'Unknown').join(',')}`);
+          }
+        }
+      }
+      throw new Error('S3_VERSION_PURGE_DID_NOT_CONVERGE');
+    }
     await this.client.send(new DeleteObjectCommand({
       Bucket: this.bucketName,
       Key: s3Key,
+      ...(versionId ? { VersionId: versionId } : {}),
     }));
   }
 
@@ -318,10 +457,11 @@ export class S3StorageAdapter implements PrivateStorageAdapter {
     }
   }
 
-  async getObjectMetadata(namespace: StorageNamespace, key: string): Promise<ObjectMetadata> {
+  async getObjectMetadata(namespace: StorageNamespace, key: string, versionId?: string | null): Promise<ObjectMetadata> {
     const response = await this.client.send(new HeadObjectCommand({
       Bucket: this.bucketName,
       Key: this.getS3Key(namespace, key),
+      ...(versionId ? { VersionId: versionId } : {}),
     }));
     if (response.ContentLength == null) throw new Error('STORAGE_OBJECT_METADATA_INVALID');
     return {
@@ -337,15 +477,19 @@ export class S3StorageAdapter implements PrivateStorageAdapter {
       Bucket: this.bucketName,
       Key: this.getS3Key(input.namespace, input.key),
       ContentType: input.contentType,
+      ContentLength: input.maxSizeBytes,
       Metadata: input.sha256 ? { sha256: input.sha256 } : undefined,
       ServerSideEncryption: 'AES256',
+      IfNoneMatch: '*',
     });
-    const url = await getSignedUrl(this.client, command, { expiresIn: input.expiresInSeconds });
+    const url = await this.presignUpload(command, input.expiresInSeconds);
     return {
       url,
       method: 'PUT',
       headers: {
         'content-type': input.contentType,
+        'content-length': String(input.maxSizeBytes),
+        'if-none-match': '*',
         ...(input.sha256 ? { 'x-amz-meta-sha256': input.sha256 } : {}),
       },
       expiresAt: new Date(Date.now() + input.expiresInSeconds * 1000),
@@ -367,6 +511,13 @@ export class S3StorageAdapter implements PrivateStorageAdapter {
 
   // Enforces all Block Public Access settings and server-side encryption controls
   async runSecurityChecks(): Promise<void> {
+    const versioning = await this.client.send(new GetBucketVersioningCommand({
+      Bucket: this.bucketName,
+    }));
+    if (versioning.Status !== 'Enabled') {
+      throw new Error(`S3 Security Exception: Versioning must be enabled on bucket ${this.bucketName}.`);
+    }
+
     try {
       const publicBlock = await this.client.send(new GetPublicAccessBlockCommand({
         Bucket: this.bucketName,

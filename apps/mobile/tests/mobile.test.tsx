@@ -42,4 +42,62 @@ describe('mobile repository contracts', () => {
 
     expect(violations).toEqual([]);
   });
+
+  it('mounts StoreKit recovery at the authenticated app lifecycle boundary', () => {
+    const layout = fs.readFileSync(path.join(sourceRoot, 'app/_layout.tsx'), 'utf8');
+    expect(layout).toContain('<StoreKitRecovery />');
+  });
+
+  it('hides covered content from touch and accessibility navigation', () => {
+    const layout = fs.readFileSync(path.join(sourceRoot, 'app/_layout.tsx'), 'utf8');
+    expect(layout).toContain("pointerEvents={shouldCoverPrivateContent ? 'none' : 'auto'}");
+    expect(layout).toContain('accessibilityElementsHidden={shouldCoverPrivateContent}');
+    expect(layout).toContain("importantForAccessibility={shouldCoverPrivateContent ? 'no-hide-descendants' : 'auto'}");
+  });
+
+  it('uses localized StoreKit terms without inventing a trial date or old product vocabulary', () => {
+    const paywall = fs.readFileSync(path.join(sourceRoot, 'components/paywall.tsx'), 'utf8');
+    expect(paywall).toContain('loadNoteBoxSubscriptionProduct');
+    expect(paywall).toContain('product?.displayPrice');
+    expect(paywall).not.toContain('trialDate');
+    expect(paywall).not.toMatch(/14-day|vault/i);
+  });
+
+  it('tries idempotent Receipt confirmation before requiring the encrypted local file', () => {
+    const appContext = fs.readFileSync(path.join(sourceRoot, 'context/AppContext.tsx'), 'utf8');
+    const receiptCase = appContext.slice(appContext.indexOf("case 'receipt.upload'"), appContext.indexOf("case 'addMore.create'"));
+    expect(receiptCase.indexOf('api.receipts.confirm')).toBeGreaterThan(-1);
+    expect(receiptCase.indexOf('api.receipts.confirm')).toBeLessThan(receiptCase.indexOf('materializeReceiptUploadAsset'));
+    expect(receiptCase.indexOf('afterCommit')).toBeLessThan(receiptCase.indexOf('removePersistedReceiptUploadAsset'));
+  });
+
+  it('starts export polling when a newly requested ticket enters state', () => {
+    const profile = fs.readFileSync(path.join(sourceRoot, 'app/profile.tsx'), 'utf8');
+    expect(profile).toContain('setExportTicketId(exportRequest.ticketId)');
+    expect(profile).toContain('}, [exportTicketId]);');
+  });
+
+  it('reports a secured offline Receipt before attempting a best-effort refresh', () => {
+    const noteDetail = fs.readFileSync(path.join(sourceRoot, 'app/note/[id].tsx'), 'utf8');
+    const successCopy = noteDetail.indexOf("Alert.alert('Receipt saved for upload'");
+    const refresh = noteDetail.indexOf('void syncWithBackend()', successCopy);
+    expect(successCopy).toBeGreaterThan(-1);
+    expect(refresh).toBeGreaterThan(successCopy);
+    expect(noteDetail).not.toContain('await Promise.all([loadReceipts(), syncWithBackend()])');
+  });
+
+  it('refreshes canonical state before reporting a permanent queue rejection', () => {
+    const appContext = fs.readFileSync(path.join(sourceRoot, 'context/AppContext.tsx'), 'utf8');
+    const syncBlock = appContext.slice(
+      appContext.indexOf('const syncWithBackend = useCallback'),
+      appContext.indexOf('// Load cache on mount'),
+    );
+    const rememberedFailure = syncBlock.indexOf('mutationFailure = error');
+    const canonicalFetch = syncBlock.indexOf('api.areas.list()');
+    const surfacedFailure = syncBlock.indexOf('if (mutationFailure) throw mutationFailure');
+
+    expect(rememberedFailure).toBeGreaterThan(-1);
+    expect(canonicalFetch).toBeGreaterThan(rememberedFailure);
+    expect(surfacedFailure).toBeGreaterThan(canonicalFetch);
+  });
 });

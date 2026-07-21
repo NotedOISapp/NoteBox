@@ -54,6 +54,49 @@ export const EXPORT_STORAGE_PROVIDER = process.env.EXPORT_STORAGE_PROVIDER || (i
 export const S3_BUCKET_NAME = process.env.S3_BUCKET_NAME || '';
 export const AWS_REGION = process.env.AWS_REGION || 'us-east-1';
 
+// Receipt security scanning and OCR are server-only provider integrations.
+// Development/test may leave them disabled; production must configure both.
+export const RECEIPT_SCAN_PROVIDER_URL = (process.env.RECEIPT_SCAN_PROVIDER_URL || '').trim();
+export const RECEIPT_SCAN_PROVIDER_TOKEN = (process.env.RECEIPT_SCAN_PROVIDER_TOKEN || '').trim();
+export const RECEIPT_OCR_PROVIDER_URL = (process.env.RECEIPT_OCR_PROVIDER_URL || '').trim();
+export const RECEIPT_OCR_PROVIDER_TOKEN = (process.env.RECEIPT_OCR_PROVIDER_TOKEN || '').trim();
+export const RECEIPT_PROCESSING_TIMEOUT_MS = parsePositiveSafeInteger(
+  process.env.RECEIPT_PROCESSING_TIMEOUT_MS || '15000',
+  'RECEIPT_PROCESSING_TIMEOUT_MS',
+);
+export const RECEIPT_PROCESSING_MAX_BYTES = parsePositiveSafeInteger(
+  process.env.RECEIPT_PROCESSING_MAX_BYTES || String(10 * 1024 * 1024),
+  'RECEIPT_PROCESSING_MAX_BYTES',
+);
+
+function validatePrivateProviderEndpoint(urlValue: string, token: string, label: string, required: boolean): void {
+  if (!urlValue && !token && !required) return;
+  if (!urlValue || !token) {
+    throw new Error(`Critical Config Error: ${label} URL and token must be configured together.`);
+  }
+  let parsed: URL;
+  try {
+    parsed = new URL(urlValue);
+  } catch {
+    throw new Error(`Critical Config Error: ${label} URL is invalid.`);
+  }
+  if (parsed.protocol !== 'https:' || parsed.username || parsed.password || parsed.hash) {
+    throw new Error(`Critical Config Error: ${label} URL must be credential-free HTTPS without a fragment.`);
+  }
+  if (token.length < 32) {
+    throw new Error(`Critical Config Error: ${label} token must be at least 32 characters.`);
+  }
+}
+
+validatePrivateProviderEndpoint(RECEIPT_SCAN_PROVIDER_URL, RECEIPT_SCAN_PROVIDER_TOKEN, 'RECEIPT_SCAN_PROVIDER', isProd);
+validatePrivateProviderEndpoint(RECEIPT_OCR_PROVIDER_URL, RECEIPT_OCR_PROVIDER_TOKEN, 'RECEIPT_OCR_PROVIDER', isProd);
+if (RECEIPT_PROCESSING_TIMEOUT_MS < 1000 || RECEIPT_PROCESSING_TIMEOUT_MS > 60000) {
+  throw new Error('Critical Config Error: RECEIPT_PROCESSING_TIMEOUT_MS must be between 1000 and 60000.');
+}
+if (RECEIPT_PROCESSING_MAX_BYTES > 50 * 1024 * 1024) {
+  throw new Error('Critical Config Error: RECEIPT_PROCESSING_MAX_BYTES cannot exceed 50 MiB.');
+}
+
 // StoreKit 2 & Apple Configuration
 export const APPLE_BUNDLE_ID = process.env.APPLE_BUNDLE_ID || (isProd ? '' : 'com.notebox.app');
 export const APPLE_APP_ID = process.env.APPLE_APP_ID || (isProd ? '' : '1234567890');

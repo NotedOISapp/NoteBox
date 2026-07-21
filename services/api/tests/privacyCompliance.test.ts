@@ -63,6 +63,12 @@ const mockStorage = {
   }),
   deleteObject: vi.fn(async () => {}),
   objectExists: vi.fn(async () => true),
+  getObjectMetadata: vi.fn(async () => ({
+    sizeBytes: 1,
+    contentType: 'image/png',
+    sha256: null,
+    versionId: 'version-1',
+  })),
 };
 
 vi.mock('../src/compliance/storage.js', () => {
@@ -456,6 +462,49 @@ describe('Privacy Compliance & Access Request System Tests', () => {
       mockQueryQueue.push([]); // final update status ready
 
       await processPendingExports();
+    });
+
+    it('fails an export instead of silently omitting a legacy unversioned Receipt', async () => {
+      const { processPendingExports } = await import('../src/cron.js');
+      const noteId = crypto.randomUUID();
+      const receiptId = crypto.randomUUID();
+
+      mockQueryQueue.push([{ id: 'export-unversioned', userId, attemptCount: 0, format: 'zip' }]);
+      mockQueryQueue.push([{ id: 'export-unversioned', userId, attemptCount: 1, format: 'zip' }]);
+      mockQueryQueue.push([]); // profile
+      mockQueryQueue.push([]); // boxes
+      mockQueryQueue.push([]); // categories
+      mockQueryQueue.push([{ id: noteId, userId, body: 'legacy note' }]); // notes
+      mockQueryQueue.push([]); // consent events
+      mockQueryQueue.push([]); // privacy preferences
+      mockQueryQueue.push([]); // DSAR requests
+      mockQueryQueue.push([]); // privacy audit logs
+      mockQueryQueue.push([]); // processing logs
+      mockQueryQueue.push([]); // retention/deletion audits
+      mockQueryQueue.push([]); // note versions
+      mockQueryQueue.push([]); // Add Mores
+      mockQueryQueue.push([]); // note people
+      mockQueryQueue.push([{
+        id: receiptId,
+        noteId,
+        userId,
+        storageKey: 'user/note/legacy-receipt',
+        providerObjectVersion: null,
+      }]);
+      mockQueryQueue.push([]); // AI responses
+      mockQueryQueue.push([]); // regeneration usage
+      mockQueryQueue.push([]); // OCR texts
+      mockQueryQueue.push([]); // people
+      mockQueryQueue.push([]); // failed status update
+      mockQueryQueue.push([]); // no next export
+
+      await processPendingExports();
+
+      expect(mockDbChain.set).toHaveBeenCalledWith(expect.objectContaining({
+        status: 'failed',
+        failureCode: 'RECEIPT_OBJECT_VERSION_UNAVAILABLE',
+      }));
+      expect(mockStorage.putObject).not.toHaveBeenCalled();
     });
 
     it('processDeletionJobs deletes S3 objects and cascades DB purge', async () => {

@@ -42,6 +42,18 @@ Production runtime: Not Expo Go only
 
 ---
 
+## Repository Boundaries
+
+The repository is a segmented workspace with independent dependency trees and ownership:
+
+- `services/api/` is the backend. It owns authentication, authorization, persistence, migrations, Receipt processing, Search, Perspectives, entitlements, exports, workers, and server-side enforcement.
+- `apps/mobile/` is the current iOS-first frontend. It owns React Native/Expo screens, device privacy, encrypted offline behavior, StoreKit presentation, and API consumption. It does not replace backend enforcement.
+- `.github/`, `scripts/`, and `docs/` are repository governance, verification, and canonical documentation—not application runtime code.
+
+A future web frontend must be added as its own application boundary (for example `apps/web/`) with its own manifest, lockfile, tests, owners, and feature branches. It must consume the backend contract rather than importing backend internals. Backend, mobile, and future-web changes should remain separate focused pull requests whenever their contracts allow it.
+
+---
+
 ## What NoteBox Is
 
 NoteBox is a private record system for users who want to capture moments, receipts, and context before memory softens or rewrites the details.
@@ -679,28 +691,24 @@ A v1 build is acceptable only when a user can:
 
 ## Local Development
 
-Install dependencies:
+Install the independent mobile and backend dependency trees from their lockfiles:
 
 ```bash
-npm install
+npm run mobile:install
+npm run api:install
 ```
 
-Start development server:
+Start the mobile development server:
 
 ```bash
-npx expo start
+cd apps/mobile
+npm start
 ```
 
-Run linting:
+Run the complete repository gate (integrations require Docker):
 
 ```bash
-npm run lint
-```
-
-Run tests:
-
-```bash
-npm test
+npm run verify
 ```
 
 Create an EAS development build:

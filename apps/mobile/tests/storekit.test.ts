@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from 'vitest';
 import {
   createStoreKitService,
   isStoreKitUserCancellation,
+  subscriptionPeriodLabel,
 } from '@/services/storekit';
 import type { StoreKitAdapter, StoreKitPurchase } from '@/services/storekit';
 
@@ -10,8 +11,16 @@ const PRODUCT_ID = 'com.notebox.pro.monthly';
 const APP_ACCOUNT_TOKEN = '00000000-0000-4000-8000-000000000001';
 const getAppAccountToken = () => Promise.resolve(APP_ACCOUNT_TOKEN);
 
+function acceptedSync(transactionId: string, status: 'created' | 'already_claimed' = 'created') {
+  return {
+    claimed: [{ transactionId, productId: PRODUCT_ID, status }],
+    entitlement: { hasProAccess: true },
+  };
+}
+
 function createAdapter(options: {
   purchases?: StoreKitPurchase[];
+  pendingPurchases?: StoreKitPurchase[];
   purchase?: StoreKitPurchase;
   purchaseError?: { code: string; message: string };
 } = {}) {
@@ -44,6 +53,10 @@ function createAdapter(options: {
       calls.push('available');
       return options.purchases ?? [];
     }),
+    getPendingTransactionsIOS: vi.fn(async () => {
+      calls.push('pending');
+      return options.pendingPurchases ?? [];
+    }),
     finishTransaction: vi.fn(async () => {
       calls.push('finish');
     }),
@@ -64,7 +77,7 @@ describe('StoreKit purchase and restore', () => {
     const { adapter, calls } = createAdapter();
     const syncTransactions = vi.fn(async () => {
       calls.push('verify');
-      return { entitlement: { hasProAccess: true } };
+      return acceptedSync('transaction-1');
     });
     const service = createStoreKitService({
       adapter,
@@ -92,7 +105,10 @@ describe('StoreKit purchase and restore', () => {
       adapter,
       productId: PRODUCT_ID,
       getAppAccountToken,
-      syncTransactions: vi.fn(async () => ({ entitlement: { hasProAccess: false } })),
+      syncTransactions: vi.fn(async () => ({
+        claimed: [{ transactionId: 'transaction-1', productId: PRODUCT_ID, status: 'created' as const }],
+        entitlement: { hasProAccess: false },
+      })),
     });
 
     await expect(service.purchase()).rejects.toThrow('backend did not verify');
@@ -114,7 +130,7 @@ describe('StoreKit purchase and restore', () => {
     });
     const syncTransactions = vi.fn(async () => {
       calls.push('verify');
-      return { entitlement: { hasProAccess: true } };
+      return acceptedSync('transaction-active');
     });
     const tokenLookup = vi.fn(getAppAccountToken);
     const service = createStoreKitService({
@@ -132,6 +148,59 @@ describe('StoreKit purchase and restore', () => {
     expect(calls.indexOf('verify')).toBeLessThan(calls.indexOf('finish'));
     expect(result.restoredCount).toBe(1);
     expect(tokenLookup).not.toHaveBeenCalled();
+  });
+
+  it('recovers native pending transactions without treating all active entitlements as unfinished', async () => {
+    const pendingPurchase = {
+      productId: PRODUCT_ID,
+      purchaseToken: 'signed-pending-transaction',
+      transactionId: 'transaction-pending',
+    };
+    const { adapter, calls } = createAdapter({
+      purchases: [{
+        productId: PRODUCT_ID,
+        purchaseToken: 'signed-active-transaction',
+        transactionId: 'transaction-active',
+      }],
+      pendingPurchases: [pendingPurchase],
+    });
+    const service = createStoreKitService({
+      adapter,
+      productId: PRODUCT_ID,
+      getAppAccountToken,
+      syncTransactions: vi.fn(async () => acceptedSync('transaction-pending')),
+    });
+
+    await expect(service.recover()).resolves.toEqual({ restoredCount: 1 });
+    expect(adapter.getPendingTransactionsIOS).toHaveBeenCalledOnce();
+    expect(adapter.getAvailablePurchases).not.toHaveBeenCalled();
+    expect(adapter.finishTransaction).toHaveBeenCalledWith({ purchase: pendingPurchase, isConsumable: false });
+    expect(calls.indexOf('pending')).toBeLessThan(calls.indexOf('finish'));
+  });
+
+  it('leaves a pending launch transaction unfinished when its exact backend claim is rejected', async () => {
+    const pendingPurchase = {
+      productId: PRODUCT_ID,
+      purchaseToken: 'signed-rejected-pending',
+      transactionId: 'transaction-rejected-pending',
+    };
+    const { adapter } = createAdapter({ pendingPurchases: [pendingPurchase] });
+    const service = createStoreKitService({
+      adapter,
+      productId: PRODUCT_ID,
+      getAppAccountToken,
+      syncTransactions: vi.fn(async () => ({
+        claimed: [{
+          transactionId: pendingPurchase.transactionId,
+          productId: PRODUCT_ID,
+          status: 'rejected' as const,
+        }],
+        entitlement: { hasProAccess: true },
+      })),
+    });
+
+    await expect(service.recover()).rejects.toThrow('exact StoreKit transaction');
+    expect(adapter.finishTransaction).not.toHaveBeenCalled();
   });
 
   it('does not invent access when there is no matching purchase to restore', async () => {
@@ -186,5 +255,68 @@ describe('StoreKit purchase and restore', () => {
     expect(adapter.requestPurchase).not.toHaveBeenCalled();
     expect(syncTransactions).not.toHaveBeenCalled();
     expect(adapter.finishTransaction).not.toHaveBeenCalled();
+  });
+
+  it('does not finish an exact transaction rejected by the backend even when the user already has paid access', async () => {
+    const { adapter } = createAdapter();
+    const service = createStoreKitService({
+      adapter,
+      productId: PRODUCT_ID,
+      getAppAccountToken,
+      syncTransactions: vi.fn(async () => ({
+        claimed: [{ transactionId: 'transaction-1', productId: PRODUCT_ID, status: 'rejected' as const }],
+        entitlement: { hasProAccess: true },
+      })),
+    });
+
+    await expect(service.purchase()).rejects.toThrow('exact StoreKit transaction');
+    expect(adapter.finishTransaction).not.toHaveBeenCalled();
+  });
+
+  it('finishes a transaction idempotently owned by the authenticated user', async () => {
+    const { adapter } = createAdapter();
+    const service = createStoreKitService({
+      adapter,
+      productId: PRODUCT_ID,
+      getAppAccountToken,
+      syncTransactions: vi.fn(async () => acceptedSync('transaction-1', 'already_claimed')),
+    });
+
+    await expect(service.purchase()).resolves.toMatchObject({
+      purchase: { transactionId: 'transaction-1' },
+    });
+    expect(adapter.finishTransaction).toHaveBeenCalledOnce();
+  });
+
+  it('loads localized product metadata without starting a purchase', async () => {
+    const { adapter } = createAdapter();
+    const service = createStoreKitService({
+      adapter,
+      productId: PRODUCT_ID,
+      getAppAccountToken,
+      syncTransactions: vi.fn(),
+    });
+
+    await expect(service.getProduct()).resolves.toMatchObject({
+      id: PRODUCT_ID,
+      displayPrice: '$7.99',
+    });
+    expect(adapter.requestPurchase).not.toHaveBeenCalled();
+    expect(adapter.endConnection).toHaveBeenCalledOnce();
+  });
+
+  it('formats the StoreKit subscription period without inventing billing dates', () => {
+    expect(subscriptionPeriodLabel({
+      id: PRODUCT_ID,
+      displayPrice: '$7.99',
+      subscriptionPeriodNumberIOS: '1',
+      subscriptionPeriodUnitIOS: 'month',
+    })).toBe('per month');
+    expect(subscriptionPeriodLabel({
+      id: PRODUCT_ID,
+      displayPrice: '$19.99',
+      subscriptionPeriodNumberIOS: '3',
+      subscriptionPeriodUnitIOS: 'month',
+    })).toBe('every 3 months');
   });
 });

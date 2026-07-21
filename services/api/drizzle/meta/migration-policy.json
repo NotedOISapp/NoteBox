@@ -9,6 +9,8 @@
     "0010_promotional_security_hardening",
     "0011_promotional_security_remediation",
     "0012_durable_idempotency",
-    "0013_storekit_subscription_ownership"
+    "0013_storekit_subscription_ownership",
+    "0014_receipt_processing_lifecycle",
+    "0015_receipt_object_immutability"
   ]
 }

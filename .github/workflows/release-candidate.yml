@@ -27,6 +27,8 @@ jobs:
       - name: Install API dependencies
         working-directory: services/api
         run: npm ci
+      - name: Reject high or critical API production advisories
+        run: npm run api:audit:production
       - name: Run API lint
         run: npm run api:lint
       - name: Run API typecheck
@@ -40,6 +42,8 @@ jobs:
       - name: Install mobile dependencies
         working-directory: apps/mobile
         run: npm ci
+      - name: Reject high or critical mobile production advisories
+        run: npm run mobile:audit:production
       - name: Run mobile lint
         run: npm run mobile:lint
       - name: Run mobile typecheck

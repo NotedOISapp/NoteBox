@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { Alert, StyleSheet, View, Pressable, Modal, ScrollView, Platform } from 'react-native';
 import * as WebBrowser from 'expo-web-browser';
 import { ThemedText } from './themed-text';
@@ -9,8 +9,11 @@ import { Spacing } from '@/constants/theme';
 import { useEntitlements } from '@/context/EntitlementContext';
 import {
   isStoreKitUserCancellation,
+  loadNoteBoxSubscriptionProduct,
   purchaseNoteBoxSubscription,
   restoreNoteBoxSubscription,
+  type StoreKitProduct,
+  subscriptionPeriodLabel,
 } from '@/services/storekit';
 
 interface PaywallProps {
@@ -23,6 +26,27 @@ export function PaywallModal({ visible, onClose }: PaywallProps) {
   const { triggerHaptic } = useHaptics();
   const { refresh, isLoading } = useEntitlements();
   const [storeKitAction, setStoreKitAction] = useState<'purchase' | 'restore' | null>(null);
+  const [product, setProduct] = useState<StoreKitProduct | null>(null);
+  const [productLoading, setProductLoading] = useState(false);
+
+  useEffect(() => {
+    if (!visible || Platform.OS !== 'ios') return;
+    let mounted = true;
+    setProductLoading(true);
+    void loadNoteBoxSubscriptionProduct()
+      .then((nextProduct) => {
+        if (mounted) setProduct(nextProduct);
+      })
+      .catch(() => {
+        if (mounted) setProduct(null);
+      })
+      .finally(() => {
+        if (mounted) setProductLoading(false);
+      });
+    return () => {
+      mounted = false;
+    };
+  }, [visible]);
 
   const handlePurchase = async () => {
     triggerHaptic('micro');
@@ -33,12 +57,22 @@ export function PaywallModal({ visible, onClose }: PaywallProps) {
     setStoreKitAction('purchase');
     try {
       await purchaseNoteBoxSubscription();
-      await refresh();
-      Alert.alert('Welcome to NoteBox Pro', 'Your purchase was verified and your membership is active.');
+      try {
+        await refresh();
+        Alert.alert('Welcome to NoteBox Pro', 'Your purchase was verified and your membership is active.');
+      } catch {
+        Alert.alert(
+          'Purchase Verified',
+          'Your purchase was verified, but NoteBox could not refresh the membership display. It will retry when the app returns to the foreground.',
+        );
+      }
       onClose();
     } catch (error) {
       if (!isStoreKitUserCancellation(error)) {
-        Alert.alert('Purchase Not Completed', 'NoteBox could not verify this purchase. You were not granted paid access.');
+        Alert.alert(
+          'Purchase Not Completed',
+          'The App Store purchase did not complete or NoteBox could not verify it. No new access was granted.',
+        );
       }
     } finally {
       setStoreKitAction(null);
@@ -54,15 +88,25 @@ export function PaywallModal({ visible, onClose }: PaywallProps) {
     setStoreKitAction('restore');
     try {
       const result = await restoreNoteBoxSubscription();
-      await refresh();
       if (result.restoredCount === 0) {
         Alert.alert('No Purchase Found', 'The App Store did not find an active NoteBox Pro purchase for this Apple ID.');
         return;
       }
-      Alert.alert('Purchases Restored', 'Your App Store purchase was verified and your membership is active.');
+      try {
+        await refresh();
+        Alert.alert('Purchases Restored', 'Your App Store purchase was verified and your membership is active.');
+      } catch {
+        Alert.alert(
+          'Purchases Restored',
+          'Your purchase was verified, but NoteBox could not refresh the membership display. It will retry when the app returns to the foreground.',
+        );
+      }
       onClose();
     } catch {
-      Alert.alert('Unable to Restore', 'NoteBox could not verify an active App Store purchase. Your access was not changed.');
+      Alert.alert(
+        'Unable to Restore',
+        'NoteBox could not complete App Store restoration or verify an active purchase. Your access was not changed.',
+      );
     } finally {
       setStoreKitAction(null);
     }
@@ -73,9 +117,10 @@ export function PaywallModal({ visible, onClose }: PaywallProps) {
     await WebBrowser.openBrowserAsync(url);
   };
 
-  const trialDate = new Date();
-  trialDate.setDate(trialDate.getDate() + 14); // 14 days trial duration
-  const trialDateStr = trialDate.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+  const price = product?.displayPrice ?? 'Price unavailable';
+  const period = product ? subscriptionPeriodLabel(product) : 'subscription period shown by Apple';
+  const hasFreeTrial = product?.introductoryPricePaymentModeIOS?.toLowerCase() === 'free-trial';
+  const purchaseUnavailable = Platform.OS === 'ios' && (productLoading || product === null);
 
   return (
     <Modal visible={visible} animationType="slide" presentationStyle="fullScreen">
@@ -101,7 +146,7 @@ export function PaywallModal({ visible, onClose }: PaywallProps) {
               NoteBox Pro
             </ThemedText>
             <ThemedText type="default" style={styles.heroSubtitle}>
-              Unlock deeper emotional analysis & unlimited vaults.
+              More room for your record, full Perspective controls, Patterns, and export.
             </ThemedText>
           </View>
 
@@ -117,9 +162,17 @@ export function PaywallModal({ visible, onClose }: PaywallProps) {
               <View style={styles.badge}>
                 <ThemedText type="code" style={styles.badgeText}>POPULAR</ThemedText>
               </View>
-              <ThemedText type="smallBold" themeColor="roseGoldDark">NOTEBOX PRO</ThemedText>
-              <ThemedText type="subtitle" style={styles.priceText}>App Store price</ThemedText>
-              <ThemedText type="small" themeColor="textSecondary">14-day trial when offered</ThemedText>
+              <ThemedText type="smallBold" themeColor="roseGoldDark">
+                {(product?.displayName || product?.title || 'NOTEBOX PRO').toUpperCase()}
+              </ThemedText>
+              <ThemedText type="subtitle" style={styles.priceText}>{price}</ThemedText>
+              <ThemedText type="small" themeColor="textSecondary">
+                {productLoading
+                  ? 'Loading App Store details…'
+                  : hasFreeTrial
+                    ? `Free trial available when Apple confirms eligibility; then ${period}`
+                    : period}
+              </ThemedText>
             </ThemedView>
           </View>
 
@@ -143,7 +196,7 @@ export function PaywallModal({ visible, onClose }: PaywallProps) {
 
             <View style={styles.tableRow}>
               <ThemedText type="small" style={styles.colLabel}>AI Perspectives</ThemedText>
-              <ThemedText type="small" style={styles.colVal}>Aligned Only</ThemedText>
+              <ThemedText type="small" style={styles.colVal}>Aligned + Objective + Unfiltered</ThemedText>
               <ThemedText type="smallBold" style={styles.colValPro}>Aligned + Objective + Unfiltered</ThemedText>
             </View>
 
@@ -155,27 +208,27 @@ export function PaywallModal({ visible, onClose }: PaywallProps) {
 
             <View style={styles.tableRow}>
               <ThemedText type="small" style={styles.colLabel}>Perspective Tones & Intensity</ThemedText>
-              <ThemedText type="small" style={styles.colVal}>Locked</ThemedText>
+              <ThemedText type="small" style={styles.colVal}>Bold default</ThemedText>
               <ThemedText type="smallBold" style={styles.colValPro}>Mild, Bold, Savage</ThemedText>
             </View>
 
             <View style={styles.tableRow}>
               <ThemedText type="small" style={styles.colLabel}>Regeneration</ThemedText>
-              <ThemedText type="small" style={styles.colVal}>Locked</ThemedText>
-              <ThemedText type="smallBold" style={styles.colValPro}>Unlimited (15 / Note)</ThemedText>
+              <ThemedText type="small" style={styles.colVal}>1 token / Note</ThemedText>
+              <ThemedText type="smallBold" style={styles.colValPro}>Unlimited in trial; then 5 per state / Note</ThemedText>
             </View>
 
             <View style={styles.tableRow}>
               <ThemedText type="small" style={styles.colLabel}>Patterns Detection</ThemedText>
               <ThemedText type="small" style={styles.colVal}>Locked</ThemedText>
-              <ThemedText type="smallBold" style={styles.colValPro}>Cross-vault insights</ThemedText>
+              <ThemedText type="smallBold" style={styles.colValPro}>Across Boxes</ThemedText>
             </View>
           </View>
 
           {/* Trial / Terms Disclosures */}
           <View style={styles.disclosures}>
             <ThemedText type="small" style={styles.disclosureText}>
-              Trial information: if the App Store offers the 14-day trial, billing begins on {trialDateStr} at the price Apple shows before confirmation.
+              Apple charges {price} {period}. Any eligible introductory offer is shown by Apple before confirmation.
             </ThemedText>
             <ThemedText type="small" style={styles.disclosureText}>
               🔒 Subscription Auto-Renewal: NoteBox Pro automatically renews unless canceled at least 24 hours before the end of the current period.
@@ -191,11 +244,19 @@ export function PaywallModal({ visible, onClose }: PaywallProps) {
           <View style={styles.buttonContainer}>
             <Pressable
               onPress={handlePurchase}
-              disabled={isLoading || storeKitAction !== null}
+              disabled={isLoading || purchaseUnavailable || storeKitAction !== null}
               style={[styles.button, { backgroundColor: theme.roseGoldDark }]}
             >
               <ThemedText type="smallBold" style={styles.buttonText}>
-                {storeKitAction === 'purchase' ? 'Contacting App Store…' : 'Start App Store Purchase'}
+                {storeKitAction === 'purchase'
+                  ? 'Contacting App Store…'
+                  : Platform.OS !== 'ios'
+                    ? 'Available on iPhone'
+                  : productLoading
+                      ? 'Loading App Store Price…'
+                      : product === null
+                        ? 'App Store Product Unavailable'
+                        : 'Start App Store Purchase'}
               </ThemedText>
             </Pressable>
 

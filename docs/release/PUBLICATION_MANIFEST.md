@@ -26,7 +26,7 @@ This manifest records the reviewed content imported into the clean publication r
 | `docs/qa/QA_SHIP_BLOCKERS.md` | QA | Public `main`/`f26e7bb` identical | Documentation | User-observable release blockers | Relocated without content loss |
 | `docs/release/` | Release | `f26e7bb` | Documentation | App-store, release, and GitHub gates | Included with this manifest |
 | `apps/mobile/` | Mobile | `f26e7bb` plus recovery fixes | Source, assets, tests, lockfile | Canonical mobile application | Included; simulated and client-only flows listed below were replaced or made fail-closed |
-| `services/api/` | API | `f26e7bb` | Source, migrations, tests, lockfile | Canonical backend application | Included |
+| `services/api/` | API | `f26e7bb` plus recovery fixes | Source, migrations, tests, lockfile | Canonical backend application | Included; async Receipt scanning/OCR now has a durable server-owned producer |
 | `scripts/` | Repository | `f26e7bb` | Verification tooling | Repository, lockfile, migration, and test-classification gates | Included |
 | `package.json`, `package-lock.json` | Repository | `f26e7bb` | Orchestration and lockfile | Canonical root commands using independent npm projects | Included |
 
@@ -69,31 +69,31 @@ No legacy branch or commit is to be cherry-picked into this repository.
 The recovery branch now includes:
 
 - Native StoreKit purchase and restore with backend verification before transaction completion, server allowlists, subscription ownership, replay protection, refund handling, and `appAccountToken` binding.
-- Real Receipt/Screenshot selection, authorized binary upload, confirmation, canonical listing/deletion, and explicit OCR processing/blocked/unavailable/ready states. No fabricated file or OCR success remains.
+- Real Receipt/Screenshot selection, app-encrypted offline attachment persistence, idempotent authorized upload/confirmation, canonical listing/deletion, and explicit OCR processing/blocked/unavailable/ready states. Durable leased workers bind private objects by Receipt, version, hash, content type, and size before invoking configured scan/OCR providers; no fabricated file or OCR success remains.
 - Backend-backed Patterns and one canonical Search endpoint covering Box titles, Notes, Add More context, People, and explicitly stored clean OCR text.
-- Device privacy lock, panic hide, encrypted authenticated local domain storage, corruption preservation, encrypted offline mutation queues, and reconnect draining.
-- Stable export and account-deletion polling contracts and client recovery.
+- Universal background privacy cover, optional biometric privacy lock, panic hide, encrypted authenticated local domain/attachment storage, corruption preservation, encrypted offline mutation queues, and reconnect draining.
+- Stable export and account-deletion polling contracts, including reauthenticated ZIP retrieval and client recovery.
 - Canonical Categories/Add Note/Profile navigation and corrected async Note/Person identity handling.
 - Server-enforced StoreKit/entitlement behavior, canonical Perspective generation, and removal of fabricated Perspective fallbacks.
 
 ## Verification evidence
 
-Verified on July 21, 2026 with Node 22.22.0 and npm 10.9.x:
+Verified on July 21, 2026 with Node 22.23.1 and npm 10.9.2:
 
 - `npm run verify`: passed.
 - Repository governance, secret-placeholder, package-lock, test-classification, migration, and repository-integrity checks: passed.
 - Mobile lint and TypeScript: passed.
-- Mobile tests: 7 files, 26 tests passed.
-- API lint, TypeScript build, and unit tests: passed; 6 files, 58 tests.
-- Docker/Testcontainers integration tests: passed; 23 files, 160 tests.
-- Migration integrity: 14 ordered migrations (5 generated, 9 manual).
+- Mobile tests: 7 files, 52 tests passed.
+- API lint, TypeScript build, and unit tests: passed; 7 files, 64 tests.
+- Docker/Testcontainers integration tests: passed; 23 files, 168 tests.
+- Migration integrity: 16 ordered migrations (5 generated, 11 manual).
 - Expo SDK dependency compatibility: passed.
 - API production dependency audit: 0 findings.
-- Mobile production dependency audit: no high or critical findings. Fourteen moderate findings remain in the Expo SDK 54 build/configuration dependency chain; npm's available remediation is the coordinated Expo SDK 57 upgrade, which is intentionally a separate platform-upgrade change rather than an automatic recovery patch. CI rejects any future high or critical production advisory.
+- Mobile production dependency audit: no high or critical findings. Fourteen moderate findings remain in the Expo SDK 54 build/configuration dependency chain; npm's available remediation is the coordinated Expo SDK 57 upgrade, which is intentionally a separate platform-upgrade change rather than an automatic recovery patch. The CI, hotfix, and release-candidate gates reject any future high or critical production advisory.
 
 ## Deployment prerequisites outside source control
 
-Repository publication does not supply production credentials or third-party console configuration. StoreKit activation still requires matching App Store Connect product and bundle/app identifiers, production Apple root certificates, App Store Server Notifications V2, and the Sign in with Apple team/key/private-key settings documented in the environment examples. These values must remain outside Git.
+Repository publication does not supply production credentials or third-party console configuration. StoreKit activation still requires matching App Store Connect product and bundle/app identifiers, production Apple root certificates, App Store Server Notifications V2, and the Sign in with Apple team/key/private-key settings documented in the environment examples. Receipt processing additionally requires private HTTPS malware-scan and OCR provider endpoints plus independent server-held tokens matching the documented binding contract. These values must remain outside Git.
 
 ## Publication gate
 

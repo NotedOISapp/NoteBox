@@ -1,10 +1,24 @@
 import React, { createContext, useContext, useState, useEffect, useCallback, ReactNode } from 'react';
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import { api, AppleCredentialPayload } from '@/services/api';
+import { api, AppleCredentialPayload, ReceiptUploadAuthorization } from '@/services/api';
 import { Platform } from 'react-native';
 import * as SecureStore from 'expo-secure-store';
 import { requestAppleReauthentication } from '@/services/apple-auth';
-import { clearMutationQueue, drainMutationQueue, enqueueMutation, PendingMutation, resolveMappedId } from '@/services/offline-queue';
+import {
+  clearMutationQueue,
+  drainMutationQueue,
+  enqueueMutation,
+  materializeReceiptUploadAsset,
+  MutationDrainError,
+  PendingMutation,
+  PermanentMutationError,
+  persistReceiptUploadAsset,
+  ReceiptUploadAssetReference,
+  ReceiptUploadSource,
+  removePersistedReceiptUploadAsset,
+  removeMaterializedReceiptUploadAsset,
+  resolveMappedId,
+} from '@/services/offline-queue';
 import NetInfo from '@react-native-community/netinfo';
 import {
   clearLocalEncryptionKey,
@@ -71,6 +85,7 @@ interface AppContextType {
   deleteBox: (id: string) => Promise<void>;
   renameBox: (id: string, name: string, categoryId?: string) => Promise<void>;
   addNote: (boxId: string, body: string, peopleIds: string[], receiptsCount?: number) => Promise<string>;
+  queueReceiptUploads: (noteId: string, assets: ReceiptUploadSource[]) => Promise<void>;
   deleteNote: (id: string) => Promise<void>;
   editNote: (id: string, body: string) => Promise<void>;
   addMoreToNote: (noteId: string, body: string) => Promise<void>;
@@ -86,13 +101,48 @@ interface AppContextType {
   hapticSetting: 'Standard' | 'Light' | 'Off';
   setHapticSetting: (setting: 'Standard' | 'Light' | 'Off') => void;
   syncWithBackend: () => Promise<void>;
-  regeneratePerspectives: (noteId: string, intensity: 'mild' | 'bold' | 'savage', scope?: 'single_note' | 'box_history' | 'people_across_boxes') => Promise<void>;
+  regeneratePerspectives: (noteId: string, intensity: 'mild' | 'bold' | 'savage', scope?: 'single_note' | 'box_history' | 'people_across_boxes', useReceipts?: boolean) => Promise<void>;
 }
 
 const AppContext = createContext<AppContextType | undefined>(undefined);
 
 const isUUID = (str: string) => /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(str);
 const localId = () => `local_${Date.now()}_${Math.random().toString(36).slice(2)}`;
+
+const resumableReceiptAuthorizationErrors = new Set([
+  'STORAGE_OBJECT_NOT_FOUND',
+  'RESERVATION_INVALID',
+  'RESERVATION_EXPIRED',
+  'RESERVATION_CONSUMED',
+]);
+
+const permanentReceiptUploadErrors = new Set([
+  'RECEIPT_LIMIT_REACHED',
+  'STORAGE_LIMIT_REACHED',
+  'NOTE_NOT_FOUND',
+  'SIZE_EXCEEDS_RESERVATION',
+  'CONTENT_TYPE_MISMATCH',
+  'CHECKSUM_MISMATCH',
+  'STORAGE_OBJECT_VERSION_MISMATCH',
+]);
+
+function errorCode(error: unknown): string {
+  return typeof error === 'object' && error !== null && 'error' in error
+    ? String((error as { error?: unknown }).error ?? '')
+    : '';
+}
+
+function rethrowReceiptUploadError(error: unknown): never {
+  const code = errorCode(error);
+  if (permanentReceiptUploadErrors.has(code)) {
+    throw new PermanentMutationError(
+      'This Receipt upload needs user attention and was moved out of the active sync queue.',
+      code,
+      { cause: error },
+    );
+  }
+  throw error;
+}
 
 export function AppProvider({ children }: { children: ReactNode }) {
   const [boxes, setBoxes] = useState<Box[]>([]);
@@ -126,7 +176,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
   };
 
   const flushMutationQueue = useCallback(async () => {
-    await drainMutationQueue(async (mutation: PendingMutation) => {
+    await drainMutationQueue(async (mutation: PendingMutation, persistPayload, afterCommit) => {
       const payload = mutation.payload as Record<string, any>;
       switch (mutation.kind) {
         case 'category.create': {
@@ -221,6 +271,59 @@ export function AppProvider({ children }: { children: ReactNode }) {
         case 'note.delete':
           await api.notes.delete(await resolveMappedId(payload.id), mutation.id);
           return;
+        case 'receipt.upload': {
+          const noteId = await resolveMappedId(payload.noteId);
+          const asset = payload.asset as ReceiptUploadAssetReference;
+          const authorization = payload.authorization as ReceiptUploadAuthorization | undefined;
+          let confirmed = false;
+
+          if (authorization) {
+            try {
+              await api.receipts.confirm(authorization.reservationId);
+              confirmed = true;
+            } catch (error) {
+              if (!resumableReceiptAuthorizationErrors.has(errorCode(error))) {
+                rethrowReceiptUploadError(error);
+              }
+            }
+          }
+
+          if (!confirmed) {
+            let uploadUri: string;
+            try {
+              uploadUri = await materializeReceiptUploadAsset(asset);
+            } catch (error) {
+              throw new PermanentMutationError(
+                'The queued Receipt file is no longer available and was moved out of the active sync queue.',
+                'LOCAL_ATTACHMENT_UNAVAILABLE',
+                { cause: error },
+              );
+            }
+            try {
+              await api.receipts.upload(noteId, {
+                uri: uploadUri,
+                contentType: asset.contentType,
+              }, {
+                authorization,
+                onAuthorization: async (nextAuthorization) => persistPayload({ authorization: nextAuthorization }),
+              });
+            } catch (error) {
+              rethrowReceiptUploadError(error);
+            } finally {
+              await removeMaterializedReceiptUploadAsset(uploadUri).catch(() => undefined);
+            }
+          }
+
+          afterCommit(() => removePersistedReceiptUploadAsset(asset.uri));
+          setNotes((previous) => {
+            const next = previous.map((item) => item.id === noteId
+              ? { ...item, receiptsCount: item.receiptsCount + 1 }
+              : item);
+            saveLocal('notebox_notes', next);
+            return next;
+          });
+          return;
+        }
         case 'addMore.create': {
           const noteId = await resolveMappedId(payload.noteId);
           const serverBlock = await api.notes.addMore(noteId, payload.body, mutation.id);
@@ -244,8 +347,14 @@ export function AppProvider({ children }: { children: ReactNode }) {
    * Syncs local state with backend endpoints if available
    */
   const syncWithBackend = useCallback(async () => {
+    let mutationFailure: MutationDrainError | null = null;
     try {
-      await flushMutationQueue();
+      try {
+        await flushMutationQueue();
+      } catch (error) {
+        if (!(error instanceof MutationDrainError)) throw error;
+        mutationFailure = error;
+      }
       // 1. Fetch areas (backend still uses areas endpoint)
       const serverAreas = await api.areas.list();
       const mappedCategories: Category[] = serverAreas.map((a: any) => ({
@@ -290,6 +399,8 @@ export function AppProvider({ children }: { children: ReactNode }) {
       const serverPeople = await api.people.list();
       setPeople(serverPeople);
       await saveLocal('notebox_people', serverPeople);
+
+      if (mutationFailure) throw mutationFailure;
 
     } catch (err) {
       // Sync failed (offline). Fallback silently.
@@ -598,6 +709,40 @@ export function AppProvider({ children }: { children: ReactNode }) {
     return resolvedId;
   };
 
+  const queueReceiptUploads = useCallback(async (noteId: string, assets: ReceiptUploadSource[]) => {
+    const queuedMutationIds = new Set<string>();
+    for (const source of assets) {
+      const mutationId = localId();
+      queuedMutationIds.add(mutationId);
+      const asset = await persistReceiptUploadAsset(source, mutationId);
+      try {
+        await enqueueMutation({
+          id: mutationId,
+          kind: 'receipt.upload',
+          createdAt: new Date().toISOString(),
+          payload: { noteId, asset },
+        });
+      } catch (error) {
+        await removePersistedReceiptUploadAsset(asset.uri).catch(() => undefined);
+        throw error;
+      }
+    }
+    try {
+      await flushMutationQueue();
+    } catch (error) {
+      if (
+        error instanceof MutationDrainError
+        && error.deadLetters.some((item) => queuedMutationIds.has(item.mutation.id))
+      ) {
+        throw new Error(
+          'The Receipt could not be accepted for upload. Later saved changes can continue syncing.',
+          { cause: error },
+        );
+      }
+      if (!(error instanceof MutationDrainError)) return;
+    }
+  }, [flushMutationQueue]);
+
   const deleteNote = async (id: string) => {
     const nextNotes = notes.filter(note => note.id !== id);
     setNotes(nextNotes);
@@ -650,14 +795,14 @@ export function AppProvider({ children }: { children: ReactNode }) {
     return resolveMappedId(tempId);
   };
 
-  const regeneratePerspectives = async (noteId: string, intensity: 'mild' | 'bold' | 'savage', scope?: 'single_note' | 'box_history' | 'people_across_boxes') => {
+  const regeneratePerspectives = async (noteId: string, intensity: 'mild' | 'bold' | 'savage', scope?: 'single_note' | 'box_history' | 'people_across_boxes', useReceipts = false) => {
     const consentKey = ['ai', 'consent', 'granted'].join('_');
     const hasConsent = await AsyncStorage.getItem(consentKey);
     if (hasConsent !== 'true') {
       throw new Error('AI consent is required before a Perspective can be generated.');
     }
     try {
-      const aiData = await api.perspectives.generate(noteId, intensity, scope);
+      const aiData = await api.perspectives.generate(noteId, intensity, scope, { useReceipts });
       const alignedP = aiData.perspectives.find((p: any) => p.perspectiveType === 'aligned');
       const unfilteredP = aiData.perspectives.find((p: any) => p.perspectiveType === 'unfiltered');
       const formatPerspectives = {
@@ -692,6 +837,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
       deleteBox,
       renameBox,
       addNote,
+      queueReceiptUploads,
       deleteNote,
       editNote,
       addMoreToNote,

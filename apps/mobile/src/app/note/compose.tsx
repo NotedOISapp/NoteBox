@@ -12,17 +12,15 @@ import { useAutosave } from '@/hooks/use-autosave';
 import { useHaptics } from '@/hooks/use-haptics';
 import * as DocumentPicker from 'expo-document-picker';
 import * as ImagePicker from 'expo-image-picker';
-import { api, ReceiptUploadAsset } from '@/services/api';
+import { ReceiptUploadSource } from '@/services/offline-queue';
 
-interface PendingAttachment extends ReceiptUploadAsset {
-  name: string;
-}
+type PendingAttachment = ReceiptUploadSource;
 
 export default function NoteComposerScreen() {
   const router = useRouter();
   const { boxId } = useLocalSearchParams<{ boxId?: string }>();
   const theme = useTheme();
-  const { boxes, people, addNote, notes, addPerson, syncWithBackend } = useApp();
+  const { boxes, people, addNote, notes, addPerson, queueReceiptUploads } = useApp();
   const { plan, limits } = useEntitlements();
   const { triggerHaptic } = useHaptics();
 
@@ -99,8 +97,9 @@ export default function NoteComposerScreen() {
       const asset = result.assets[0];
       addAttachment({
         uri: asset.uri,
-        name: asset.fileName || 'screenshot.jpg',
+        fileName: asset.fileName || 'screenshot.jpg',
         contentType: asset.mimeType || 'image/jpeg',
+        attachmentKind: 'screenshot',
       });
       triggerHaptic('micro');
     }
@@ -116,8 +115,9 @@ export default function NoteComposerScreen() {
       const asset = result.assets[0];
       addAttachment({
         uri: asset.uri,
-        name: asset.name,
+        fileName: asset.name,
         contentType: asset.mimeType || 'application/octet-stream',
+        attachmentKind: 'receipt',
       });
       triggerHaptic('micro');
     }
@@ -128,28 +128,22 @@ export default function NoteComposerScreen() {
     setIsSubmitting(true);
     try {
       const savedNoteId = await addNote(selectedBoxId, draftText, selectedPeopleIds, 0);
-      let failedUploads = 0;
-
-      if (attachments.length > 0 && savedNoteId.startsWith('local_')) {
-        failedUploads = attachments.length;
-      } else {
-        for (const attachment of attachments) {
-          try {
-            await api.receipts.upload(savedNoteId, attachment);
-          } catch {
-            failedUploads += 1;
-          }
+      let failedToQueue = 0;
+      for (const attachment of attachments) {
+        try {
+          await queueReceiptUploads(savedNoteId, [attachment]);
+        } catch {
+          failedToQueue += 1;
         }
       }
 
-      if (attachments.length > failedUploads) await syncWithBackend();
-      await triggerHaptic(failedUploads === 0 ? 'success' : 'warning');
+      await triggerHaptic(failedToQueue === 0 ? 'success' : 'warning');
       await discardDraft();
       router.replace(`/note/${savedNoteId}`);
-      if (failedUploads > 0) {
+      if (failedToQueue > 0) {
         Alert.alert(
-          'Note saved; attachment not added',
-          `${failedUploads} selected file${failedUploads === 1 ? '' : 's'} could not be uploaded. Reconnect and attach again from the Note.`,
+          'Note saved; attachment not queued',
+          `${failedToQueue} selected file${failedToQueue === 1 ? '' : 's'} could not be preserved for upload. Attach ${failedToQueue === 1 ? 'it' : 'them'} again from the Note.`,
         );
       }
     } catch (error: any) {
@@ -260,11 +254,11 @@ export default function NoteComposerScreen() {
               <Pressable
                 key={`${attachment.uri}-${index}`}
                 onPress={() => setAttachments((current) => current.filter((_, itemIndex) => itemIndex !== index))}
-                accessibilityLabel={`Remove ${attachment.name}`}
+                accessibilityLabel={`Remove ${attachment.fileName}`}
                 accessibilityRole="button"
                 style={[styles.attachmentChip, { backgroundColor: theme.backgroundSelected }]}
               >
-                <ThemedText type="small" numberOfLines={1}>{attachment.name} · Remove</ThemedText>
+                <ThemedText type="small" numberOfLines={1}>{attachment.fileName} · Remove</ThemedText>
               </Pressable>
             ))}
           </ThemedView>

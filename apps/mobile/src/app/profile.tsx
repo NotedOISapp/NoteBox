@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { StyleSheet, Pressable, Alert, View, Platform, Switch } from 'react-native';
+import { StyleSheet, Pressable, Alert, View, Platform, Switch, Linking, Share } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
 import * as WebBrowser from 'expo-web-browser';
@@ -22,6 +22,10 @@ import {
   triggerPanicHide,
 } from '@/services/privacy-lock';
 import { getEncryptedItem, removeEncryptedItem, setEncryptedItem } from '@/services/secure-local-storage';
+import { Directory, File, Paths } from 'expo-file-system';
+
+const EXPORT_TICKET_KEY = 'notebox_export_ticket';
+const EXPORT_DOWNLOAD_URL_KEY = 'notebox_export_download_url';
 
 export default function ProfileScreen() {
   const router = useRouter();
@@ -34,12 +38,23 @@ export default function ProfileScreen() {
   const [faceIdEnabled, setFaceIdEnabled] = useState(false);
   const [doNotSellEnabled, setDoNotSellEnabled] = useState(true);
   const [paywallVisible, setPaywallVisible] = useState(false);
+  const [exportTicketId, setExportTicketId] = useState<string | null>(null);
   const [exportStatus, setExportStatus] = useState<string | null>(null);
+  const [exportDownloadUrl, setExportDownloadUrl] = useState<string | null>(null);
 
   useEffect(() => {
     getPrivacyLockEnabled().then(setFaceIdEnabled);
     getEncryptedItem('notebox_do_not_sell_opt_out').then((val) => {
       if (val !== null) setDoNotSellEnabled(val === 'true');
+    });
+    getEncryptedItem(EXPORT_DOWNLOAD_URL_KEY).then((downloadUrl) => {
+      if (downloadUrl) {
+        setExportDownloadUrl(downloadUrl);
+        setExportStatus('ready');
+      }
+    });
+    getEncryptedItem(EXPORT_TICKET_KEY).then((storedTicketId) => {
+      setExportTicketId((currentTicketId) => currentTicketId ?? storedTicketId);
     });
   }, []);
 
@@ -48,16 +63,24 @@ export default function ProfileScreen() {
     let timer: ReturnType<typeof setTimeout> | undefined;
 
     const poll = async () => {
-      const ticketId = await getEncryptedItem('notebox_export_ticket');
-      if (!ticketId || !active) return;
+      if (!exportTicketId || !active) return;
       try {
-        const response = await api.compliance.getDataExportStatus(ticketId);
+        const response = await api.compliance.getDataExportStatus(exportTicketId);
         if (!active) return;
         setExportStatus(response.status);
+        if (response.status === 'ready' && response.downloadUrl) {
+          setExportDownloadUrl(response.downloadUrl);
+          await setEncryptedItem(EXPORT_DOWNLOAD_URL_KEY, response.downloadUrl);
+        }
         if (response.status === 'pending' || response.status === 'processing') {
           timer = setTimeout(() => void poll(), 5000);
-        } else if (response.status === 'failed') {
-          await removeEncryptedItem('notebox_export_ticket');
+        } else if (response.status === 'failed' || response.status === 'expired') {
+          setExportTicketId(null);
+          setExportDownloadUrl(null);
+          await Promise.all([
+            removeEncryptedItem(EXPORT_TICKET_KEY),
+            removeEncryptedItem(EXPORT_DOWNLOAD_URL_KEY),
+          ]);
         }
       } catch {
         if (active) {
@@ -72,7 +95,7 @@ export default function ProfileScreen() {
       active = false;
       if (timer) clearTimeout(timer);
     };
-  }, []);
+  }, [exportTicketId]);
 
   const handleHapticChange = (setting: 'Off' | 'Light' | 'Standard') => {
     setHapticSetting(setting);
@@ -147,11 +170,46 @@ export default function ProfileScreen() {
     }
   };
 
+  const handleDownloadExport = async () => {
+    if (!exportDownloadUrl) {
+      Alert.alert('Download unavailable', 'The ZIP download location is not available yet. Refresh the archive status and try again.');
+      return;
+    }
+    triggerHaptic('micro');
+    try {
+      await api.auth.reauthenticate('data_export', requestAppleReauthentication);
+      const bytes = await api.compliance.downloadDataExport(exportDownloadUrl);
+      if (Platform.OS === 'web') {
+        const blob = new Blob([bytes.buffer as ArrayBuffer], { type: 'application/zip' });
+        const objectUrl = URL.createObjectURL(blob);
+        const anchor = document.createElement('a');
+        anchor.href = objectUrl;
+        anchor.download = 'NoteBox-data-export.zip';
+        anchor.click();
+        URL.revokeObjectURL(objectUrl);
+      } else {
+        const directory = new Directory(Paths.document, 'notebox-exports');
+        directory.create({ intermediates: true, idempotent: true });
+        const file = new File(directory, 'NoteBox-data-export.zip');
+        file.create({ overwrite: true, intermediates: true });
+        file.write(bytes);
+        if (Platform.OS === 'ios') {
+          await Share.share({ title: 'NoteBox data export', url: file.uri });
+        } else {
+          await Linking.openURL(file.contentUri);
+        }
+      }
+      triggerHaptic('success');
+    } catch (error: any) {
+      Alert.alert('ZIP download failed', error?.message || 'The archive could not be downloaded or opened. Please try again.');
+    }
+  };
+
   const handleRequestData = () => {
     triggerHaptic('micro');
     Alert.alert(
       'Request My Data (DSAR)',
-      'Under data privacy laws (CCPA/CPRA), you have the right to request a copy of your personal data.\n\nNoteBox will prepare a secure ZIP export of your account data.',
+      'Under data privacy laws (CCPA/CPRA), you have the right to request a copy of your personal data.\n\nNoteBox will prepare a ZIP archive available through an authenticated download.',
       [
         { text: 'Cancel', style: 'cancel' },
         {
@@ -161,11 +219,16 @@ export default function ProfileScreen() {
             try {
               await api.auth.reauthenticate('data_export', requestAppleReauthentication);
               const exportRequest = await api.compliance.requestDataExport();
-              await setEncryptedItem('notebox_export_ticket', exportRequest.ticketId);
+              await Promise.all([
+                setEncryptedItem(EXPORT_TICKET_KEY, exportRequest.ticketId),
+                removeEncryptedItem(EXPORT_DOWNLOAD_URL_KEY),
+              ]);
+              setExportDownloadUrl(null);
               setExportStatus('pending');
+              setExportTicketId(exportRequest.ticketId);
               Alert.alert(
                 'Export Queued',
-                `Your secure export is being prepared. Request ID: ${exportRequest.ticketId}`
+                `Your ZIP archive is being prepared. Request ID: ${exportRequest.ticketId}`
               );
             } catch (err) {
               console.warn('Data export submission failed:', err);
@@ -410,7 +473,7 @@ export default function ProfileScreen() {
                 </View>
 
                 <Pressable onPress={handleRequestData} style={styles.subRowItem}>
-                  <ThemedText style={styles.subRowText}>Request Data Archive (JSON)</ThemedText>
+                  <ThemedText style={styles.subRowText}>Request Data Archive (ZIP)</ThemedText>
                   <SymbolView name="square.and.arrow.up" size={14} tintColor="#6F6763" />
                 </Pressable>
 
@@ -419,9 +482,23 @@ export default function ProfileScreen() {
                     <View style={{ flex: 1 }}>
                       <ThemedText style={styles.toggleRowTitle}>Data archive status</ThemedText>
                       <ThemedText style={styles.toggleRowSubtitle}>
-                        {exportStatus === 'ready' ? 'Your archive is ready for authenticated download.' : exportStatus}
+                        {exportStatus === 'ready'
+                          ? exportDownloadUrl
+                            ? 'Your ZIP archive is ready for an authenticated download.'
+                            : 'Your ZIP archive is ready, but its download location is unavailable.'
+                          : exportStatus}
                       </ThemedText>
                     </View>
+                    {exportStatus === 'ready' && exportDownloadUrl && (
+                      <Pressable
+                        accessibilityRole="button"
+                        accessibilityLabel="Download and open NoteBox ZIP data archive"
+                        onPress={() => void handleDownloadExport()}
+                        style={styles.downloadArchiveButton}
+                      >
+                        <ThemedText style={styles.downloadArchiveButtonText}>Download ZIP</ThemedText>
+                      </Pressable>
+                    )}
                   </View>
                 )}
 
@@ -653,6 +730,19 @@ const styles = StyleSheet.create({
     fontSize: 11,
     color: '#6F6763',
     marginTop: 2,
+  },
+  downloadArchiveButton: {
+    minHeight: 44,
+    justifyContent: 'center',
+    paddingHorizontal: 14,
+    marginLeft: 8,
+    borderRadius: 22,
+    backgroundColor: '#B76E79',
+  },
+  downloadArchiveButtonText: {
+    color: '#FFF',
+    fontSize: 11,
+    fontWeight: '700',
   },
   hapticControlSection: {
     gap: Spacing.two,

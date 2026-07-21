@@ -7,7 +7,9 @@ export const platformEnum = pgEnum('platform', ['apple', 'google', 'stripe']);
 export const subStatusEnum = pgEnum('sub_status', ['trial', 'active', 'grace', 'on_hold', 'canceled', 'expired', 'refunded']);
 export const entitlementPlanEnum = pgEnum('entitlement_plan', ['free', 'trial', 'paid']);
 export const perspectiveTypeEnum = pgEnum('perspective_type', ['aligned', 'objective', 'unfiltered']);
-export const scanStatusEnum = pgEnum('scan_status', ['pending', 'clean', 'rejected']);
+export const scanStatusEnum = pgEnum('scan_status', ['pending', 'clean', 'rejected', 'unavailable']);
+export const receiptProcessingJobTypeEnum = pgEnum('receipt_processing_job_type', ['scan', 'ocr']);
+export const receiptProcessingJobStatusEnum = pgEnum('receipt_processing_job_status', ['pending', 'processing', 'succeeded', 'rejected', 'unavailable']);
 export const consentPurposeEnum = pgEnum('consent_purpose', ['ai_processing', 'third_party_ai', 'targeted_ads', 'sale_share', 'analytics']);
 export const actorEnum = pgEnum('actor_type', ['user', 'admin', 'system']);
 export const deletionModeEnum = pgEnum('deletion_mode', ['soft', 'hard']);
@@ -165,6 +167,7 @@ export const receipts = pgTable('receipts', {
   noteId: uuid('note_id').references(() => notes.id, { onDelete: 'cascade' }).notNull(),
   userId: uuid('user_id').references(() => users.id, { onDelete: 'cascade' }).notNull(),
   storageKey: text('storage_key').unique().notNull(),
+  providerObjectVersion: text('provider_object_version'),
   contentType: text('content_type').notNull(),
   sha256: text('sha256').notNull(),
   sizeBytes: bigint('size_bytes', { mode: 'bigint' }).notNull(),
@@ -177,7 +180,39 @@ export const ocrTexts = pgTable('ocr_texts', {
   receiptId: uuid('receipt_id').references(() => receipts.id, { onDelete: 'cascade' }).notNull(),
   extractedText: text('extracted_text').notNull(), // encrypted
   createdAt: timestamp('created_at').defaultNow().notNull(),
-});
+  updatedAt: timestamp('updated_at').defaultNow().notNull(),
+}, (t) => ({
+  receiptIdUnique: uniqueIndex('ocr_texts_receipt_id_unique').on(t.receiptId),
+}));
+
+export const receiptProcessingJobs = pgTable('receipt_processing_jobs', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  receiptId: uuid('receipt_id').references(() => receipts.id, { onDelete: 'cascade' }).notNull(),
+  userId: uuid('user_id').references(() => users.id, { onDelete: 'cascade' }).notNull(),
+  jobType: receiptProcessingJobTypeEnum('job_type').notNull(),
+  status: receiptProcessingJobStatusEnum('status').default('pending').notNull(),
+  storageKey: text('storage_key').notNull(),
+  expectedObjectVersion: text('expected_object_version'),
+  expectedSha256: text('expected_sha256'),
+  expectedContentType: text('expected_content_type').notNull(),
+  expectedSizeBytes: bigint('expected_size_bytes', { mode: 'bigint' }).notNull(),
+  provider: text('provider'),
+  providerReference: text('provider_reference'),
+  failureCode: text('failure_code'),
+  attemptCount: integer('attempt_count').default(0).notNull(),
+  nextAttemptAt: timestamp('next_attempt_at'),
+  claimedBy: text('claimed_by'),
+  claimToken: uuid('claim_token'),
+  leaseExpiresAt: timestamp('lease_expires_at'),
+  startedAt: timestamp('started_at'),
+  completedAt: timestamp('completed_at'),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+  updatedAt: timestamp('updated_at').defaultNow().notNull(),
+}, (t) => ({
+  receiptJobTypeUnique: uniqueIndex('receipt_processing_jobs_receipt_type_unique').on(t.receiptId, t.jobType),
+  claimIdx: index('receipt_processing_jobs_claim_idx').on(t.status, t.nextAttemptAt, t.leaseExpiresAt),
+  userIdIdx: index('receipt_processing_jobs_user_id_idx').on(t.userId),
+}));
 
 export const aiResponses = pgTable('ai_responses', {
   id: uuid('id').primaryKey().defaultRandom(),

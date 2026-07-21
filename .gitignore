@@ -3,6 +3,7 @@ node_modules/
 
 # Expo
 .expo/
+.expo-shared/
 dist/
 web-build/
 
@@ -59,6 +60,11 @@ google-services.json
 # Testing and coverage
 coverage/
 jest-cache/
+services/api/tests/.integration-state.json
+services/api/tests/**/*.js
+services/api/tests/**/*.js.map
+services/api/tests/**/*.d.ts
+services/api/tests/**/*.d.ts.map
 
 # TypeScript
 *.tsbuildinfo
@@ -71,6 +77,8 @@ out/
 tmp/
 temp/
 *.tmp
+.npm-cache*/
+.package-cache/
 
 # User data / exports
 exports/
@@ -84,3 +92,20 @@ crash-reports/
 
 # OS files
 Thumbs.db
+
+# Agent/Operator local tools
+.agents/
+..agents/
+Athena/
+Superpower/
+athena/
+superpower/
+antigravity-awesome-skills/
+.local-agents/
+Local-Agent-Tools/
+
+# Clean repository zipping tool
+CREATE_AUDIT_ZIP.ps1
+
+# Local audit output directory
+audits/

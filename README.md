@@ -14,13 +14,30 @@ If AI disappeared, the user's saved Notes, Receipts, People tags, Search, Boxes,
 
 ---
 
+## Production workflow
+
+NoteBox uses protected branch development.
+
+- `main` is production-ready only.
+- `develop` is integration.
+- `feature/*` is for isolated features.
+- `bugfix/*` is for normal bug fixes.
+- `hotfix/*` is for production emergencies.
+- `release/*` is for TestFlight and App Store release candidates.
+
+Do not push directly to `main`.
+
+Read `AGENTS.md` and `docs/release/RELEASE_PROCESS.md` before changing code.
+
+---
+
 ## Product Status
 
-Status: v1 build  
-Platform: iOS first  
-Deployment target: Apple App Store  
-Founder workflow: PC-based review through Google Antigravity, Expo EAS builds, TestFlight, and iPhone testing  
-Production build path: React Native + Expo EAS Development Builds  
+Status: v1 build
+Platform: iOS first
+Deployment target: Apple App Store
+Founder workflow: PC-based review through Google Antigravity, Expo EAS builds, TestFlight, and iPhone testing
+Production build path: React Native + Expo EAS Development Builds
 Production runtime: Not Expo Go only
 
 ---

@@ -1,0 +1,13 @@
+{
+  "generatedSnapshotThrough": "0004_violet_black_panther",
+  "manualMigrationsWithoutSnapshots": [
+    "0005_enable_rls",
+    "0006_add_categories",
+    "0007_people_identity_resolution",
+    "0008_privacy_compliance",
+    "0009_promotional_entitlements",
+    "0010_promotional_security_hardening",
+    "0011_promotional_security_remediation",
+    "0012_durable_idempotency"
+  ]
+}

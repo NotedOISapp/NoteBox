@@ -1,0 +1,48 @@
+name: Release Candidate Gate
+
+on:
+  push:
+    branches: ['release/*']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  release-verification:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22.16.0'
+      - name: Run repository safety checks
+        run: npm run check:repository
+      - name: Install API dependencies
+        working-directory: services/api
+        run: npm ci
+      - name: Run API lint
+        run: npm run api:lint
+      - name: Run API typecheck
+        run: npm run api:typecheck
+      - name: Build API
+        run: npm run api:build
+      - name: Run API unit tests
+        run: npm run api:test:unit
+      - name: Run API integration tests (Docker required)
+        run: npm run api:test:integration
+      - name: Install mobile dependencies
+        working-directory: apps/mobile
+        run: npm ci
+      - name: Run mobile lint
+        run: npm run mobile:lint
+      - name: Run mobile typecheck
+        run: npm run mobile:typecheck
+      - name: Run mobile tests
+        run: npm run mobile:test

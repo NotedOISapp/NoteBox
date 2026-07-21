@@ -1,92 +1,71 @@
-import React from 'react';
-import { StyleSheet, ScrollView, Pressable } from 'react-native';
+import React, { useCallback, useEffect, useState } from 'react';
+import { ActivityIndicator, Alert, Pressable, ScrollView, StyleSheet } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
+
 import { ThemedText } from '@/components/themed-text';
 import { ThemedView } from '@/components/themed-view';
 import { BottomTabInset, MaxContentWidth, Spacing } from '@/constants/theme';
-import { useTheme } from '@/hooks/use-theme';
 import { useEntitlements } from '@/context/EntitlementContext';
 import { useHaptics } from '@/hooks/use-haptics';
-import { useApp } from '@/context/AppContext';
+import { useTheme } from '@/hooks/use-theme';
+import { api, PatternInsight } from '@/services/api';
 
 export default function PatternsScreen() {
   const router = useRouter();
   const theme = useTheme();
   const { plan } = useEntitlements();
   const { triggerHaptic } = useHaptics();
+  const [patterns, setPatterns] = useState<PatternInsight[]>([]);
+  const [isLoading, setIsLoading] = useState(plan !== 'free');
+  const [loadError, setLoadError] = useState<string | null>(null);
 
-  const { notes, boxes } = useApp();
-
-  const getDynamicPatterns = () => {
-    const list: any[] = [];
-
-    // 1. Scan for Minimization pattern
-    const minimizationKeywords = ['minimize', 'minimizing', 'just a joke', 'overthinking', 'exaggerating', 'no big deal', 'downplay', 'downplayed', 'fine'];
-    const minimizationSnippets: any[] = [];
-
-    notes.forEach((note: any) => {
-      const bodyLower = note.body.toLowerCase();
-      const matchedKeyword = minimizationKeywords.find(k => bodyLower.includes(k));
-      if (matchedKeyword) {
-        const boxName = boxes.find((b: any) => b.id === note.boxId)?.name || 'General';
-        const sentences = note.body.split(/[.!?]/);
-        const matchSentence = sentences.find((s: any) => s.toLowerCase().includes(matchedKeyword))?.trim() || note.body.substring(0, 80);
-
-        minimizationSnippets.push({
-          date: new Date(note.createdAt).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }),
-          box: boxName,
-          quote: `"${matchSentence}..."`
-        });
-      }
-    });
-
-    if (minimizationSnippets.length >= 2) {
-      list.push({
-        id: 'dyn_p1',
-        title: 'Minimization Pattern Detected',
-        description: 'Occurrences identified where feedback or discomfort was categorized as overthinking or downplayed.',
-        snippets: minimizationSnippets
-      });
+  const loadPatterns = useCallback(async () => {
+    if (plan === 'free') {
+      setPatterns([]);
+      setIsLoading(false);
+      return;
     }
 
-    // 2. Scan for Boundary Conflicts
-    const boundaryKeywords = ['yell', 'yelling', 'yelled', 'fight', 'argued', 'boundary', 'boundaries', 'crossed'];
-    const boundarySnippets: any[] = [];
-
-    notes.forEach((note: any) => {
-      const bodyLower = note.body.toLowerCase();
-      const matchedKeyword = boundaryKeywords.find(k => bodyLower.includes(k));
-      if (matchedKeyword) {
-        const boxName = boxes.find((b: any) => b.id === note.boxId)?.name || 'General';
-        const sentences = note.body.split(/[.!?]/);
-        const matchSentence = sentences.find((s: any) => s.toLowerCase().includes(matchedKeyword))?.trim() || note.body.substring(0, 80);
-
-        boundarySnippets.push({
-          date: new Date(note.createdAt).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }),
-          box: boxName,
-          quote: `"${matchSentence}..."`
-        });
-      }
-    });
-
-    if (boundarySnippets.length >= 2) {
-      list.push({
-        id: 'dyn_p2',
-        title: 'Boundary Conflict Detected',
-        description: 'Repeated friction points identified regarding communication limits or boundary pushback.',
-        snippets: boundarySnippets
-      });
+    setIsLoading(true);
+    setLoadError(null);
+    try {
+      setPatterns(await api.patterns.list());
+    } catch (error) {
+      const message = typeof error === 'object' && error && 'message' in error
+        ? String(error.message)
+        : 'Patterns could not be loaded.';
+      setLoadError(message);
+    } finally {
+      setIsLoading(false);
     }
+  }, [plan]);
 
-    return list;
-  };
-
-  const patterns = getDynamicPatterns();
+  useEffect(() => {
+    void loadPatterns();
+  }, [loadPatterns]);
 
   const handleUpgrade = () => {
     triggerHaptic('micro');
-    router.push('/settings');
+    router.push('/profile');
+  };
+
+  const dismissPattern = (pattern: PatternInsight) => {
+    Alert.alert('Dismiss Pattern?', 'This Pattern will no longer appear.', [
+      { text: 'Cancel', style: 'cancel' },
+      {
+        text: 'Dismiss',
+        style: 'destructive',
+        onPress: async () => {
+          try {
+            await api.patterns.dismiss(pattern.key);
+            setPatterns((current) => current.filter((item) => item.key !== pattern.key));
+          } catch {
+            Alert.alert('Dismiss Failed', 'This Pattern could not be dismissed. Please try again.');
+          }
+        },
+      },
+    ]);
   };
 
   return (
@@ -103,52 +82,75 @@ export default function PatternsScreen() {
         </ThemedView>
 
         {plan === 'free' ? (
-          /* Locked State for Free Plan */
           <ThemedView type="backgroundElement" style={styles.lockedCard}>
             <ThemedText type="smallBold" style={{ color: theme.roseGoldDark }}>
               Premium Pattern Insights
             </ThemedText>
             <ThemedText type="default" style={styles.lockedDescription}>
-              Unlock client-side patterns detection. NoteBox will search across your boxes to identify repeating patterns and double standards with exact quote snippets.
+              Unlock server-verified Pattern insights across your saved Notes, with exact supporting snippets.
             </ThemedText>
-
             <Pressable
+              accessibilityRole="button"
               onPress={handleUpgrade}
-              style={[styles.upgradeCTA, { backgroundColor: theme.roseGoldDark }]}
+              style={[styles.primaryButton, { backgroundColor: theme.roseGoldDark }]}
             >
-              <ThemedText style={styles.upgradeText}>Upgrade to Unlock</ThemedText>
+              <ThemedText style={styles.primaryButtonText}>Upgrade to Unlock</ThemedText>
             </Pressable>
           </ThemedView>
         ) : (
-          /* Unlocked State for Trial / Paid */
           <ThemedView style={styles.patternsContainer}>
-            {patterns.length === 0 ? (
+            {isLoading ? (
               <ThemedView type="backgroundElement" style={styles.patternCard}>
-                <ThemedText type="smallBold" style={styles.patternTitle}>No patterns yet</ThemedText>
-                <ThemedText type="default" style={styles.patternDesc}>
-                  Patterns appear only when your saved notes contain repeated, matching evidence.
+                <ActivityIndicator color={theme.roseGoldDark} accessibilityLabel="Loading Patterns" />
+              </ThemedView>
+            ) : loadError ? (
+              <ThemedView type="backgroundElement" style={styles.patternCard}>
+                <ThemedText type="smallBold" style={styles.patternTitle}>Patterns unavailable</ThemedText>
+                <ThemedText type="default" style={styles.patternDescription}>{loadError}</ThemedText>
+                <Pressable
+                  accessibilityRole="button"
+                  onPress={() => void loadPatterns()}
+                  style={[styles.primaryButton, { backgroundColor: theme.roseGoldDark }]}
+                >
+                  <ThemedText style={styles.primaryButtonText}>Try Again</ThemedText>
+                </Pressable>
+              </ThemedView>
+            ) : patterns.length === 0 ? (
+              <ThemedView type="backgroundElement" style={styles.patternCard}>
+                <ThemedText type="smallBold" style={styles.patternTitle}>No Patterns yet</ThemedText>
+                <ThemedText type="default" style={styles.patternDescription}>
+                  Patterns appear only when your saved Notes contain repeated, matching evidence.
                 </ThemedText>
               </ThemedView>
-            ) : patterns.map(p => (
-              <ThemedView key={p.id} type="backgroundElement" style={styles.patternCard}>
-                <ThemedText type="smallBold" style={styles.patternTitle}>{p.title}</ThemedText>
-                <ThemedText type="default" style={styles.patternDesc}>{p.description}</ThemedText>
-
+            ) : patterns.map((pattern) => (
+              <ThemedView key={pattern.key} type="backgroundElement" style={styles.patternCard}>
+                <ThemedText type="smallBold" style={styles.patternTitle}>{pattern.name}</ThemedText>
+                <ThemedText type="default" style={styles.patternDescription}>{pattern.description}</ThemedText>
                 <ThemedView style={styles.snippetsSection}>
                   <ThemedText type="smallBold" themeColor="textSecondary" style={styles.snippetsTitle}>
-                    Proof Snippets:
+                    Supporting snippets
                   </ThemedText>
-                  {p.snippets.map((s: any, idx: number) => (
-                    <ThemedView key={idx} style={styles.snippetRow}>
-                      <ThemedText type="smallBold" style={styles.snippetMeta}>
-                        {s.box} • {s.date}
-                      </ThemedText>
-                      <ThemedText type="small" themeColor="textSecondary" style={styles.snippetQuote}>
-                        {s.quote}
-                      </ThemedText>
-                    </ThemedView>
+                  {pattern.matches.map((match, index) => (
+                    <Pressable
+                      key={`${match.noteId}-${index}`}
+                      accessibilityRole="button"
+                      accessibilityLabel="Open matching Note"
+                      onPress={() => router.push(`/note/${match.noteId}`)}
+                    >
+                      <ThemedView style={styles.snippetRow}>
+                        <ThemedText type="smallBold" style={styles.snippetMeta}>
+                          {new Date(match.date).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}
+                        </ThemedText>
+                        <ThemedText type="small" themeColor="textSecondary" style={styles.snippetQuote}>
+                          {match.quote}
+                        </ThemedText>
+                      </ThemedView>
+                    </Pressable>
                   ))}
                 </ThemedView>
+                <Pressable accessibilityRole="button" onPress={() => dismissPattern(pattern)}>
+                  <ThemedText type="small" themeColor="textSecondary">Dismiss</ThemedText>
+                </Pressable>
               </ThemedView>
             ))}
           </ThemedView>
@@ -159,14 +161,8 @@ export default function PatternsScreen() {
 }
 
 const styles = StyleSheet.create({
-  scrollView: {
-    flex: 1,
-  },
-  contentContainer: {
-    flexGrow: 1,
-    justifyContent: 'center',
-    flexDirection: 'row',
-  },
+  scrollView: { flex: 1 },
+  contentContainer: { flexGrow: 1, justifyContent: 'center', flexDirection: 'row' },
   safeArea: {
     flex: 1,
     paddingHorizontal: Spacing.four,
@@ -174,90 +170,43 @@ const styles = StyleSheet.create({
     paddingBottom: BottomTabInset + Spacing.three,
     paddingTop: Spacing.four,
   },
-  header: {
-    alignItems: 'flex-start',
-    marginBottom: Spacing.five,
-    gap: Spacing.one,
-  },
-  title: {
-    fontWeight: '700',
-  },
-  subheadline: {
-    fontSize: 16,
-    fontStyle: 'italic',
-  },
+  header: { alignItems: 'flex-start', marginBottom: Spacing.five, gap: Spacing.one },
+  title: { fontWeight: '700' },
+  subheadline: { fontSize: 16, fontStyle: 'italic' },
   lockedCard: {
     padding: Spacing.five,
     borderRadius: Spacing.four,
     gap: Spacing.three,
     alignSelf: 'stretch',
     alignItems: 'center',
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.04,
-    shadowRadius: 8,
-    elevation: 2,
     marginTop: Spacing.two,
   },
-  lockedDescription: {
-    textAlign: 'center',
-    lineHeight: 22,
-    fontSize: 15,
-  },
-  upgradeCTA: {
+  lockedDescription: { textAlign: 'center', lineHeight: 22, fontSize: 15 },
+  primaryButton: {
     alignSelf: 'stretch',
     paddingVertical: Spacing.three,
     borderRadius: 30,
     alignItems: 'center',
     marginTop: Spacing.two,
-    shadowColor: '#2E2A28',
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.1,
-    shadowRadius: 6,
-    elevation: 3,
   },
-  upgradeText: {
-    color: '#FFF',
-    fontWeight: '600',
-  },
-  patternsContainer: {
-    gap: Spacing.four,
-    alignSelf: 'stretch',
-  },
-  patternCard: {
-    padding: Spacing.four,
-    borderRadius: Spacing.four,
-    gap: Spacing.two,
-  },
-  patternTitle: {
-    fontSize: 18,
-  },
-  patternDesc: {
-    fontSize: 15,
-    lineHeight: 22,
-    marginBottom: Spacing.two,
-  },
+  primaryButtonText: { color: '#FFF', fontWeight: '600' },
+  patternsContainer: { gap: Spacing.four, alignSelf: 'stretch' },
+  patternCard: { padding: Spacing.four, borderRadius: Spacing.four, gap: Spacing.two },
+  patternTitle: { fontSize: 18 },
+  patternDescription: { fontSize: 15, lineHeight: 22, marginBottom: Spacing.two },
   snippetsSection: {
     borderTopWidth: 1,
     borderTopColor: 'rgba(0,0,0,0.04)',
     paddingTop: Spacing.three,
     gap: Spacing.two,
   },
-  snippetsTitle: {
-    fontSize: 11,
-    textTransform: 'uppercase',
-  },
+  snippetsTitle: { fontSize: 11, textTransform: 'uppercase' },
   snippetRow: {
     gap: Spacing.one,
     paddingLeft: Spacing.two,
     borderLeftWidth: 2,
-    borderLeftColor: '#E8B4B8', // Rose Gold Light highlight
+    borderLeftColor: '#E8B4B8',
   },
-  snippetMeta: {
-    fontSize: 12,
-  },
-  snippetQuote: {
-    fontSize: 13,
-    fontStyle: 'italic',
-  },
+  snippetMeta: { fontSize: 12 },
+  snippetQuote: { fontSize: 13, fontStyle: 'italic' },
 });

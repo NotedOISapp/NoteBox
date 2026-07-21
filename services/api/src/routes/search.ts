@@ -10,7 +10,6 @@ import {
   people,
   personAliases,
   personMentions,
-  privacyPreferences
 } from '../db/schema.js';
 import { eq, and, isNull, inArray, or } from 'drizzle-orm';
 import { decrypt } from '../utils/crypto.js';
@@ -24,10 +23,11 @@ router.use(authMiddleware);
 router.use(eligibilityMiddleware);
 
 interface SearchMatch {
-  noteId: string;
+  resultType: 'note' | 'box';
+  noteId: string | null;
   boxId: string;
   boxName: string;
-  matchType: 'note_body' | 'add_more' | 'ocr_text';
+  matchType: 'box_title' | 'note_body' | 'add_more' | 'ocr_text' | 'person';
   snippet: string;
   createdAt: string;
 }
@@ -40,23 +40,16 @@ router.get('/', async (req: AuthenticatedRequest, res: Response): Promise<void> 
   const { q, boxId, page = '1', limit = '10' } = req.query;
   const userId = req.user!.userId;
 
-  if (!q) {
+  if (typeof q !== 'string' || q.trim().length === 0) {
     res.status(400).json({ error: 'ValidationError', message: 'Search query parameter q is required' });
     return;
   }
 
-  const queryStr = (q as string).toLowerCase().trim();
-  const pageNum = parseInt(page as string, 10) || 1;
-  const limitNum = parseInt(limit as string, 10) || 10;
+  const queryStr = q.toLowerCase().trim();
+  const pageNum = Math.max(1, parseInt(page as string, 10) || 1);
+  const limitNum = Math.min(100, Math.max(1, parseInt(limit as string, 10) || 10));
 
   try {
-    const [prefs] = await db
-      .select()
-      .from(privacyPreferences)
-      .where(eq(privacyPreferences.userId, userId))
-      .limit(1);
-    const aiProcessingAllowed = prefs?.aiProcessingAllowed ?? false;
-
     // 1. Fetch boxes for mapping name
     const userBoxes = await db
       .select()
@@ -106,10 +99,14 @@ router.get('/', async (req: AuthenticatedRequest, res: Response): Promise<void> 
       allReceipts = await db
         .select()
         .from(receipts)
-        .where(eq(receipts.userId, userId));
+        .where(and(
+          eq(receipts.userId, userId),
+          inArray(receipts.noteId, noteIds),
+          eq(receipts.scanStatus, 'clean'),
+        ));
 
       const receiptIds = allReceipts.map((r) => r.id);
-      if (receiptIds.length > 0 && aiProcessingAllowed) {
+      if (receiptIds.length > 0) {
         allOcrTexts = await db
           .select()
           .from(ocrTexts)
@@ -129,6 +126,23 @@ router.get('/', async (req: AuthenticatedRequest, res: Response): Promise<void> 
       return `...${before}<mark>${match}</mark>${after}...`;
     };
 
+    // Box titles are first-class results. A scoped search only returns the requested Box.
+    for (const box of userBoxes) {
+      if (boxId && box.id !== boxId) continue;
+      const titleIndex = box.name.toLowerCase().indexOf(queryStr);
+      if (titleIndex !== -1) {
+        matches.push({
+          resultType: 'box',
+          noteId: null,
+          boxId: box.id,
+          boxName: box.name,
+          matchType: 'box_title',
+          snippet: getSnippet(box.name, titleIndex, queryStr.length),
+          createdAt: box.createdAt.toISOString(),
+        });
+      }
+    }
+
     // 4. In-memory decryption and search matching
     for (const note of allNotes) {
       const boxName = boxMap.get(note.boxId) || 'Unknown';
@@ -139,6 +153,7 @@ router.get('/', async (req: AuthenticatedRequest, res: Response): Promise<void> 
       const bodyIdx = lowerBody.indexOf(queryStr);
       if (bodyIdx !== -1) {
         matches.push({
+          resultType: 'note',
           noteId: note.id,
           boxId: note.boxId,
           boxName,
@@ -158,6 +173,7 @@ router.get('/', async (req: AuthenticatedRequest, res: Response): Promise<void> 
         const blockIdx = lowerBlock.indexOf(queryStr);
         if (blockIdx !== -1) {
           matches.push({
+            resultType: 'note',
             noteId: note.id,
             boxId: note.boxId,
             boxName,
@@ -183,6 +199,7 @@ router.get('/', async (req: AuthenticatedRequest, res: Response): Promise<void> 
         const ocrIdx = lowerOcr.indexOf(queryStr);
         if (ocrIdx !== -1) {
           matches.push({
+            resultType: 'note',
             noteId: note.id,
             boxId: note.boxId,
             boxName,
@@ -220,10 +237,11 @@ router.get('/', async (req: AuthenticatedRequest, res: Response): Promise<void> 
 
       if (matchMentionText || matchPersonText) {
         matches.push({
+          resultType: 'note',
           noteId: note.id,
           boxId: note.boxId,
           boxName,
-          matchType: 'note_body',
+          matchType: 'person',
           snippet: `[Person Match]: ...${decryptedBody.substring(0, Math.min(decryptedBody.length, 60))}...`,
           createdAt: note.createdAt.toISOString()
         });

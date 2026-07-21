@@ -6,6 +6,7 @@ import { reauthenticateUser, generateMockAppleToken } from '../utils/appleTestAu
 describe('Account Deletion Route Tests (SEC-023)', () => {
   let tokenA: string;
   let tokenB: string;
+  let deletionStatusToken: string;
 
   beforeAll(async () => {
     const appleIdA = 'del_user_a';
@@ -48,6 +49,7 @@ describe('Account Deletion Route Tests (SEC-023)', () => {
     expect(res.status).toBe(202);
     expect(res.body.success).toBe(true);
     expect(res.body).toHaveProperty('statusToken');
+    deletionStatusToken = res.body.statusToken;
 
     // Verify job was created in DB with correct status
     const crypto = await import('crypto');
@@ -66,6 +68,20 @@ describe('Account Deletion Route Tests (SEC-023)', () => {
       .get('/v1/boxes')
       .set('Authorization', `Bearer ${tokenB}`);
     expect(boxRes.status).toBe(200);
+  });
+
+  it('returns a stable unauthenticated deletion polling contract', async () => {
+    const res = await request(app)
+      .get('/v1/privacy/delete/status')
+      .set('Authorization', `DeletionStatus ${deletionStatusToken}`);
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({
+      success: true,
+      status: 'pending',
+      terminal: false,
+    });
+    expect(res.body.jobId).toEqual(expect.any(String));
+    expect(res.body.retryAfterSeconds).toBeGreaterThan(0);
   });
 
   it('deletion job is idempotent', async () => {

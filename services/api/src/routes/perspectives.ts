@@ -27,6 +27,30 @@ import { logError, logWarn } from '../utils/logger.js';
 
 const router = Router();
 
+export interface PerspectiveTestGeneratorInput {
+  body: string;
+  historyCount: number;
+  metadata: {
+    recordConfidence: RecordConfidence;
+    accountabilityRead: AccountabilityRead;
+    contextStatus: ContextStatus;
+  };
+}
+
+type PerspectiveTestGenerator = (input: PerspectiveTestGeneratorInput) => any;
+
+function getPerspectiveTestGenerator(): PerspectiveTestGenerator | null {
+  if (process.env.NODE_ENV !== 'test') return null;
+  return (globalThis as any).__noteboxPerspectiveTestGenerator ?? null;
+}
+
+export function setPerspectiveTestGenerator(generator: PerspectiveTestGenerator | null): void {
+  if (process.env.NODE_ENV !== 'test') {
+    throw new Error('Perspective test adapters can only be configured in the test environment.');
+  }
+  (globalThis as any).__noteboxPerspectiveTestGenerator = generator;
+}
+
 // Apply auth middleware to all routes in this router
 router.use(authMiddleware);
 router.use(eligibilityMiddleware);
@@ -45,126 +69,6 @@ function redactPII(text: string): string {
   redacted = redacted.replace(phoneRegex, '[REDACTED_PHONE]');
 
   return redacted;
-}
-
-/**
- * High-quality fallback procedural mocks mapping exact Voice Contract examples
- */
-function getMockPerspectives(
-  body: string,
-  historyCount: number,
-  metadata?: {
-    recordConfidence: RecordConfidence;
-    accountabilityRead: AccountabilityRead;
-    contextStatus: ContextStatus;
-  }
-): any {
-  const text = body.toLowerCase();
-
-  // 1. Determine or default mock metadata
-  let recordConfidence: RecordConfidence = 'developing';
-  let accountabilityRead: AccountabilityRead = 'mixed';
-  let contextStatus: ContextStatus = 'complete_enough';
-
-  if (text.includes('cancel') || text.includes('late')) {
-    recordConfidence = 'strong';
-    accountabilityRead = 'mixed';
-    contextStatus = 'complete_enough';
-  } else if (text.includes('boss') || text.includes('instructions') || text.includes('meeting')) {
-    recordConfidence = 'strong';
-    accountabilityRead = 'user_supported';
-    contextStatus = 'complete_enough';
-  } else if (text.length < 20) {
-    recordConfidence = 'thin';
-    accountabilityRead = 'insufficient_context';
-    contextStatus = 'missing_decisive_fact';
-  }
-
-  // Override if metadata passed
-  if (metadata) {
-    recordConfidence = metadata.recordConfidence;
-    accountabilityRead = metadata.accountabilityRead;
-    contextStatus = metadata.contextStatus;
-  }
-
-  let alignedText = "That would feel frustrating because you were asking for clarity, not drama. Saving this detail makes sense because the plan was left unclear and then your follow-up was framed as excessive. You are keeping a record of what actually happened, which is a grounding move.";
-  let objectiveText = "The sequence is: he left the plan unclear, then framed your request for consideration as the issue. An outside reading is that communication has broken down, and the emotional effort of managing it has landed on you. The question is whether this is a one-off mismatch or a repeated dynamic.";
-  let unfilteredText = "He disappeared from the plan, then tried to make your follow-up look like the drama. That is a convenient little move: create the uncertainty upfront, then act exhausted by the person trying to clarify it. You are carrying the cost of his disorganization while he avoids responsibility.";
-
-  if (text.includes('cancel') || text.includes('late')) {
-    alignedText = "That would wear on anyone. The cancellation itself is frustrating, but the harder part is that your need for basic notice keeps getting treated like an overreaction. You are not wrong to keep track of that.";
-    objectiveText = "Across the available details, the sequence shows last-minute changes and limited notice, followed by pushback when you ask for consideration. The question is whether flexibility is being shared, or if it is a repeated setup where you carry the cleanup.";
-    unfilteredText = "He gets flexibility while you get the cleanup. Then, when you ask for basic notice, he created a narrative where you introduced unnecessary friction. It is a very convenient arrangement where the cost of his schedule falls completely onto your shoulders.";
-  } else if (text.includes('boss') || text.includes('instructions') || text.includes('meeting')) {
-    alignedText = "That would feel unfair. You were working from unclear directions, then got judged in a setting as if the expectations had been obvious the whole time. Saving this makes sense because the record shows the mismatch.";
-    objectiveText = "The issue is the mismatch between unclear direction upfront and specific criticism afterward. The question is whether expectations are being clarified before the work starts, or only after there is an audience.";
-    unfilteredText = "She created instructions that were blurry, then waited until there was a room of witnesses to become suddenly specific. That is using ambiguity as a convenient trapdoor where you carry the cleanup cost of her failure to lead properly.";
-  }
-
-  // Adjust for thin records
-  let missingDecisiveFact: string | undefined;
-  if (recordConfidence === 'thin' || contextStatus === 'missing_decisive_fact') {
-    unfilteredText = "There is not enough here for a hard read yet. The missing piece is whether you had set explicit expectations beforehand.";
-    missingDecisiveFact = "whether you had set explicit expectations beforehand";
-  }
-
-  const hardRead = recordConfidence === 'strong' && (accountabilityRead === 'user_primary_cause' || accountabilityRead === 'user_contributed');
-
-  return {
-    aligned: {
-      title: 'Aligned',
-      subheadline: 'Feel understood, right now.',
-      responseText: alignedText,
-      safetyFlags: ['clean'],
-      qualityChecks: {
-        specificToNote: true,
-        avoidedCornyLanguage: true,
-        avoidedDiagnosis: true,
-        avoidedEscalation: true,
-        avoidedTherapyLanguage: true,
-        groundedInProvidedContext: true,
-        perspectiveBucketDistinct: true,
-        alignedHasEmotionalAccuracy: true
-      }
-    },
-    objective: {
-      title: 'Objective',
-      subheadline: 'Outside perspective.',
-      responseText: objectiveText,
-      safetyFlags: ['clean'],
-      qualityChecks: {
-        specificToNote: true,
-        avoidedCornyLanguage: true,
-        avoidedDiagnosis: true,
-        avoidedEscalation: true,
-        avoidedTherapyLanguage: true,
-        groundedInProvidedContext: true,
-        perspectiveBucketDistinct: true,
-        objectiveHasClarity: true
-      }
-    },
-    unfiltered: {
-      title: 'Unfiltered',
-      subheadline: 'No holding back.',
-      responseText: unfilteredText,
-      safetyFlags: ['clean'],
-      recordConfidence,
-      accountabilityRead,
-      contextStatus,
-      hardRead,
-      missingDecisiveFact,
-      qualityChecks: {
-        specificToNote: true,
-        avoidedCornyLanguage: true,
-        avoidedDiagnosis: true,
-        avoidedEscalation: true,
-        avoidedTherapyLanguage: true,
-        groundedInProvidedContext: true,
-        perspectiveBucketDistinct: true,
-        unfilteredHasBite: true
-      }
-    }
-  };
 }
 
 function normalizePerspectiveRequest(input: any): any {
@@ -226,7 +130,8 @@ router.post('/:id/perspectives', auditRoute('generate_perspectives', 'note'), as
       return;
     }
 
-    if (!openai && process.env.NODE_ENV !== 'test') {
+    const testGenerator = getPerspectiveTestGenerator();
+    if (!openai && !testGenerator) {
       res.status(503).json({
         error: 'AI_SERVICE_UNAVAILABLE',
         message: 'AI Perspectives are temporarily unavailable. No generated response was saved.',
@@ -354,8 +259,8 @@ router.post('/:id/perspectives', auditRoute('generate_perspectives', 'note'), as
         userId,
         noteId: id,
         mode: 'third_party_api',
-        modelProvider: openai ? 'openai' : 'mock',
-        modelVersion: openai ? 'gpt-4o-mini' : 'mock-generator',
+        modelProvider: openai ? 'openai' : 'test-adapter',
+        modelVersion: openai ? 'gpt-4o-mini' : 'test-adapter',
         lineageId,
         status: 'processing',
         redactionApplied: isRedacted,
@@ -629,12 +534,20 @@ router.post('/:id/perspectives', auditRoute('generate_perspectives', 'note'), as
         }
       }
 
-      if (!tempRawData) {
-        tempRawData = getMockPerspectives(redactedBody, redactedHistory.length, {
-          recordConfidence,
-          accountabilityRead,
-          contextStatus
+      if (!tempRawData && testGenerator) {
+        tempRawData = testGenerator({
+          body: redactedBody,
+          historyCount: redactedHistory.length,
+          metadata: { recordConfidence, accountabilityRead, contextStatus },
         });
+      }
+
+      if (!tempRawData) {
+        complianceError = Object.assign(
+          new Error('AI Perspectives are temporarily unavailable. No generated response was saved.'),
+          { name: 'AI_SERVICE_UNAVAILABLE', status: 503 },
+        );
+        break;
       }
 
       // Structure, clean punctuation normalization, and compliance assertions
@@ -649,7 +562,7 @@ router.post('/:id/perspectives', auditRoute('generate_perspectives', 'note'), as
         supportReferences: tempRawData.aligned.supportReferences || '',
         confidence: tempRawData.aligned.confidence || 'high',
         generatedAt: new Date().toISOString(),
-        model: openai ? 'openai/gpt-4o-mini' : 'mock-generator',
+        model: openai ? 'openai/gpt-4o-mini' : 'test-adapter',
         regenVersion: currentRegenVersion,
         qualityChecks: tempRawData.aligned.qualityChecks
       };
@@ -665,7 +578,7 @@ router.post('/:id/perspectives', auditRoute('generate_perspectives', 'note'), as
         supportReferences: tempRawData.objective.supportReferences || '',
         confidence: tempRawData.objective.confidence || 'high',
         generatedAt: new Date().toISOString(),
-        model: openai ? 'openai/gpt-4o-mini' : 'mock-generator',
+        model: openai ? 'openai/gpt-4o-mini' : 'test-adapter',
         regenVersion: currentRegenVersion,
         qualityChecks: tempRawData.objective.qualityChecks
       };
@@ -681,7 +594,7 @@ router.post('/:id/perspectives', auditRoute('generate_perspectives', 'note'), as
         supportReferences: tempRawData.unfiltered.supportReferences || '',
         confidence: tempRawData.unfiltered.confidence || 'high',
         generatedAt: new Date().toISOString(),
-        model: openai ? 'openai/gpt-4o-mini' : 'mock-generator',
+        model: openai ? 'openai/gpt-4o-mini' : 'test-adapter',
         regenVersion: currentRegenVersion,
         recordConfidence: tempRawData.unfiltered.recordConfidence || recordConfidence,
         accountabilityRead: tempRawData.unfiltered.accountabilityRead || accountabilityRead,
@@ -745,8 +658,8 @@ router.post('/:id/perspectives', auditRoute('generate_perspectives', 'note'), as
           userId,
           perspectiveType,
           responseText: encrypt(JSON.stringify(payload)),
-          modelProvider: openai ? 'openai' : 'mock',
-          modelVersion: openai ? 'gpt-4o-mini' : 'mock-generator',
+          modelProvider: openai ? 'openai' : 'test-adapter',
+          modelVersion: openai ? 'gpt-4o-mini' : 'test-adapter',
           lineageId,
           versionNum: isInitialGeneration ? 1 : currentRegenVersion,
           isCurrent: true,

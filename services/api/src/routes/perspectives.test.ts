@@ -4,6 +4,7 @@ import { app } from '../index.js';
 import { db } from '../db/index.js';
 import { entitlements, userCampaignStates } from '../db/schema.js';
 import { eq } from 'drizzle-orm';
+import { setPerspectiveTestGenerator } from './perspectives.js';
 
 describe('Perspectives Route Tests', () => {
   let token: string;
@@ -130,5 +131,26 @@ describe('Perspectives Route Tests', () => {
       .send({ targetState: 'aligned' });
     expect(res2.status).toBe(402);
     expect(res2.body.error).toBe('PERSPECTIVE_REGEN_LIMIT_REACHED');
+  });
+
+  it('returns unavailable without saving fabricated output when no provider is configured', async () => {
+    const created = await request(app)
+      .post('/v1/notes')
+      .set('Authorization', `Bearer ${token}`)
+      .send({ boxId, body: 'A separate Note used to verify provider unavailability.' });
+    const unavailableNoteId = created.body.id;
+
+    setPerspectiveTestGenerator(null);
+    const res = await request(app)
+      .post(`/v1/notes/${unavailableNoteId}/perspectives`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({});
+    expect(res.status).toBe(503);
+    expect(res.body.error).toBe('AI_SERVICE_UNAVAILABLE');
+
+    const listed = await request(app)
+      .get(`/v1/notes/${unavailableNoteId}/perspectives`)
+      .set('Authorization', `Bearer ${token}`);
+    expect(listed.body.perspectives).toEqual([]);
   });
 });

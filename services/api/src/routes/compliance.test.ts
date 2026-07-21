@@ -5,6 +5,7 @@ import { reauthenticateUser, generateMockAppleToken } from '../utils/appleTestAu
 
 describe('Compliance Route Tests', () => {
   let token: string;
+  let exportTicketId: string;
 
   beforeAll(async () => {
     const appleId = 'compliance_test_user';
@@ -55,6 +56,21 @@ describe('Compliance Route Tests', () => {
     expect(res.status).toBe(202);
     expect(res.body.success).toBe(true);
     expect(res.body).toHaveProperty('ticketId');
+    exportTicketId = res.body.ticketId;
+  });
+
+  it('returns a stable pollable export status contract', async () => {
+    const res = await request(app)
+      .get(`/v1/privacy/export-request/${exportTicketId}`)
+      .set('Authorization', `Bearer ${token}`);
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({
+      success: true,
+      ticketId: exportTicketId,
+      status: 'pending',
+      terminal: false,
+    });
+    expect(res.body.retryAfterSeconds).toBeGreaterThan(0);
   });
 
   it('submits general DSAR request via POST /v1/privacy/request', async () => {

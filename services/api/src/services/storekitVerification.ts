@@ -11,6 +11,7 @@ import {
   APPLE_BUNDLE_ID,
   APPLE_APP_ID_NUMBER,
   APPLE_STOREKIT_ENVIRONMENT,
+  APPLE_SUBSCRIPTION_PRODUCT_IDS,
   APPLE_ROOT_CERTIFICATES_PATH,
   APPLE_STOREKIT_ENABLE_ONLINE_CHECKS,
   isProd,
@@ -40,14 +41,22 @@ export const PROMOTIONAL_PRODUCT_MAP = {
 
 export type PromotionalProductId = keyof typeof PROMOTIONAL_PRODUCT_MAP;
 export type PromotionalGrantType = 'founding_launch' | 'founding_extension' | 'creator_bonus';
+export type StoreKitProductKind = 'promotional' | 'subscription';
+
+export function isPromotionalProductId(productId: string): productId is PromotionalProductId {
+  return productId in PROMOTIONAL_PRODUCT_MAP;
+}
 
 export interface VerifiedStoreKitTransaction {
   transactionId: string;
   originalTransactionId: string | null;
-  productId: PromotionalProductId;
+  productId: string;
+  productKind: StoreKitProductKind;
   appAccountToken: string | null;
   purchaseDate: Date;
   originalPurchaseDate: Date | null;
+  expiresAt: Date | null;
+  offerDiscountType: string | null;
   environment: 'Sandbox' | 'Production';
   revokedAt: Date | null;
   revocationReason: string | null;
@@ -160,8 +169,22 @@ export function validateVerifiedStoreKitClaims(
   if (environment !== APPLE_STOREKIT_ENVIRONMENT) {
     throw new Error('STOREKIT_TRANSACTION_INVALID');
   }
-  if (!(productIdRaw in PROMOTIONAL_PRODUCT_MAP)) {
+  const isPromotionalProduct = isPromotionalProductId(productIdRaw);
+  const isSubscriptionProduct = APPLE_SUBSCRIPTION_PRODUCT_IDS.includes(productIdRaw);
+  if (!isPromotionalProduct && !isSubscriptionProduct) {
     throw new Error('STOREKIT_PRODUCT_NOT_RECOGNIZED');
+  }
+
+  let expiresAt: Date | null = null;
+  if (isSubscriptionProduct) {
+    if (
+      decoded.type !== 'Auto-Renewable Subscription'
+      || !decoded.originalTransactionId
+      || decoded.expiresDate == null
+    ) {
+      throw new Error('STOREKIT_TRANSACTION_INVALID');
+    }
+    expiresAt = parseRequiredDate(decoded.expiresDate);
   }
 
   const purchaseDate = parseRequiredDate(decoded.purchaseDate);
@@ -171,18 +194,30 @@ export function validateVerifiedStoreKitClaims(
   const revokedAt = decoded.revocationDate == null
     ? null
     : parseRequiredDate(decoded.revocationDate);
+  const appAccountToken = decoded.appAccountToken
+    ? String(decoded.appAccountToken).toLowerCase()
+    : null;
+  if (
+    appAccountToken
+    && !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(appAccountToken)
+  ) {
+    throw new Error('STOREKIT_TRANSACTION_INVALID');
+  }
 
   return {
     transactionId,
     originalTransactionId: decoded.originalTransactionId
       ? String(decoded.originalTransactionId)
       : null,
-    productId: productIdRaw as PromotionalProductId,
-    appAccountToken: decoded.appAccountToken
-      ? String(decoded.appAccountToken).toLowerCase()
-      : null,
+    productId: productIdRaw,
+    productKind: isPromotionalProduct ? 'promotional' : 'subscription',
+    appAccountToken,
     purchaseDate,
     originalPurchaseDate,
+    expiresAt,
+    offerDiscountType: decoded.offerDiscountType == null
+      ? null
+      : String(decoded.offerDiscountType),
     environment,
     revokedAt,
     revocationReason: decoded.revocationReason == null

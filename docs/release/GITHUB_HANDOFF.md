@@ -8,9 +8,10 @@ This repository may be sent to GitHub only from the repository working tree, nev
 2. Run `npm ci` in `apps/mobile` and `services/api`.
 3. Ensure Docker is running; backend integration tests start PostgreSQL and Redis Testcontainers and must fail if those services cannot start.
 4. Run `npm run verify` at the repository root.
-5. Run `git status --short`, `git diff --stat`, and `git diff --summary`.
-6. Confirm `git ls-files -s` contains no mode `160000` entries and there are no nested `.git` directories.
-7. Review every untracked file before staging. Do not use blanket staging until secrets, archives, generated outputs, and local operator tooling have been ruled out.
+5. Run `npm run audit:production`; high or critical findings block publication.
+6. Run `git status --short`, `git diff --stat`, and `git diff --summary`.
+7. Confirm `git ls-files -s` contains no mode `160000` entries and there are no nested `.git` directories.
+8. Review every untracked file before staging. Do not use blanket staging until secrets, archives, generated outputs, and local operator tooling have been ruled out.
 
 ## Secrets and archives
 
@@ -23,4 +24,4 @@ This repository may be sent to GitHub only from the repository working tree, nev
 
 The CI, hotfix, and release workflows run repository integrity checks, API lint/typecheck/build, both API test suites, and mobile lint/typecheck/tests. A Docker or Testcontainers failure is a failed integration gate; it is never reported as a skipped or successful test run.
 
-The `@NotedOISapp` CODEOWNERS handle must be confirmed as a real GitHub user or organization team before branch protection requires code-owner approval.
+The `@NotedOISapp` CODEOWNERS handle was confirmed as a real GitHub user on July 21, 2026. Reconfirm ownership before enabling required code-owner approval if repository ownership changes.

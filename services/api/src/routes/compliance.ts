@@ -308,6 +308,8 @@ router.post(
         success: true,
         ticketId: exportTicket.id,
         status: 'pending',
+        terminal: false,
+        retryAfterSeconds: 5,
       });
     } catch (error) {
       logError('Error requesting data export', error);
@@ -357,6 +359,8 @@ router.post(
         success: true,
         ticketId: exportTicket.id,
         status: 'pending',
+        terminal: false,
+        retryAfterSeconds: 5,
       });
     } catch (error) {
       logError('Error requesting product export', error);
@@ -393,7 +397,9 @@ router.get(
       if (ticket.status === 'ready') {
         res.json({
           success: true,
+          ticketId: ticket.id,
           status: 'ready',
+          terminal: true,
           expiresAt: ticket.expiresAt,
           generatedAt: ticket.generatedAt,
           downloadUrl: `/v1/privacy/export-request/${ticket.id}/download`,
@@ -401,13 +407,27 @@ router.get(
       } else if (ticket.status === 'failed') {
         res.json({
           success: true,
+          ticketId: ticket.id,
           status: 'failed',
+          terminal: true,
           failureCode: ticket.failureCode || 'UNKNOWN_ERROR',
+        });
+      } else if (ticket.status === 'expired') {
+        res.json({
+          success: true,
+          ticketId: ticket.id,
+          status: 'expired',
+          terminal: true,
+          expiresAt: ticket.expiresAt,
         });
       } else {
         res.json({
           success: true,
+          ticketId: ticket.id,
           status: ticket.status,
+          terminal: false,
+          retryAfterSeconds: 5,
+          updatedAt: ticket.updatedAt,
         });
       }
     } catch (error) {
@@ -551,6 +571,9 @@ router.post(
       res.status(202).json({
         success: true,
         message: 'Account deletion initiated. All access sessions revoked. Data will be permanently purged.',
+        status: 'pending',
+        terminal: false,
+        retryAfterSeconds: 5,
         statusToken: opaqueToken,
         expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(),
       });
@@ -664,8 +687,12 @@ router.get(
 
       res.json({
         success: true,
-        status: job.status, // 'pending' or 'processing'
+        jobId: job.id,
+        status: job.status,
+        terminal: job.status === 'completed' || job.status === 'failed',
+        ...(!['completed', 'failed'].includes(job.status) ? { retryAfterSeconds: 5 } : {}),
         queuedAt: job.createdAt,
+        updatedAt: job.updatedAt,
       });
     } catch (error) {
       logError('Error checking deletion status', error);

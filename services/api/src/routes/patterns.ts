@@ -1,7 +1,7 @@
 import { Router, Response } from 'express';
 import { AuthenticatedRequest, authMiddleware } from '../middleware/auth.js';
 import { db } from '../db/index.js';
-import { notes, dismissedPatterns, addMores, entitlements, people, personMentions } from '../db/schema.js';
+import { notes, boxes, dismissedPatterns, people, personMentions } from '../db/schema.js';
 import { eq, and, isNull, gt, or } from 'drizzle-orm';
 import { decrypt } from '../utils/crypto.js';
 import { auditRoute } from '../middleware/audit.js';
@@ -61,6 +61,13 @@ router.get('/', async (req: AuthenticatedRequest, res: Response) => {
       .from(notes)
       .where(and(eq(notes.userId, userId), isNull(notes.deletedAt)));
 
+    const activeBoxes = await db
+      .select()
+      .from(boxes)
+      .where(and(eq(boxes.userId, userId), isNull(boxes.deletedAt)));
+    const boxNames = new Map(activeBoxes.map((box) => [box.id, box.name]));
+    const activeNoteIds = new Set(activeNotes.map((note) => note.id));
+
     const activePeople = await db
       .select()
       .from(people)
@@ -102,6 +109,7 @@ router.get('/', async (req: AuthenticatedRequest, res: Response) => {
             quote,
             date: note.createdAt.toISOString(),
             noteId: note.id,
+            boxName: boxNames.get(note.boxId) || 'Unknown Box',
           });
           break; // Avoid duplicate matches for same note
         }
@@ -119,6 +127,7 @@ router.get('/', async (req: AuthenticatedRequest, res: Response) => {
             quote,
             date: note.createdAt.toISOString(),
             noteId: note.id,
+            boxName: boxNames.get(note.boxId) || 'Unknown Box',
           });
           break; // Avoid duplicate matches for same note
         }
@@ -128,21 +137,21 @@ router.get('/', async (req: AuthenticatedRequest, res: Response) => {
     // 4. Assemble insights
     const insights: any[] = [];
 
-    if (minimizationMatches.length > 0 && !blockedPatternKeys.has('minimization')) {
+    if (minimizationMatches.length >= 2 && !blockedPatternKeys.has('minimization')) {
       insights.push({
         key: 'minimization',
         name: 'Minimization Pattern',
-        description: 'You have recorded notes where situations are described as "just a joke," "overthinking," or "no big deal." This shape represents minimization.',
-        matches: minimizationMatches,
+        description: 'I noticed repeated wording such as "just a joke," "overthinking," or "no big deal" in your saved Notes.',
+        matches: minimizationMatches.slice(0, 3),
       });
     }
 
-    if (boundaryMatches.length > 0 && !blockedPatternKeys.has('boundary_dispute')) {
+    if (boundaryMatches.length >= 2 && !blockedPatternKeys.has('boundary_dispute')) {
       insights.push({
         key: 'boundary_dispute',
         name: 'Boundary Disputes',
-        description: 'You have recorded instances containing descriptions of shouting, interruptions, or crossed lines. This represents potential boundary conflicts.',
-        matches: boundaryMatches,
+        description: 'I noticed repeated descriptions of shouting, interruptions, or crossed lines in your saved Notes.',
+        matches: boundaryMatches.slice(0, 3),
       });
     }
 
@@ -151,48 +160,71 @@ router.get('/', async (req: AuthenticatedRequest, res: Response) => {
       .select()
       .from(personMentions)
       .where(eq(personMentions.userId, userId));
+    const activeMentions = mentions.filter((mention) => activeNoteIds.has(mention.sourceId));
 
-    const confirmedCountMap = new Map<string, { name: string; count: number }>();
-    const unconfirmedCountMap = new Map<string, number>();
+    const confirmedCountMap = new Map<string, { name: string; noteIds: Set<string> }>();
+    const unconfirmedCountMap = new Map<string, Set<string>>();
 
-    for (const m of mentions) {
+    for (const m of activeMentions) {
       if (m.status === 'confirmed' && m.linkedPersonId) {
         const p = activePeople.find(person => person.id === m.linkedPersonId);
         if (p) {
-          const entry = confirmedCountMap.get(p.id) || { name: p.displayName, count: 0 };
-          entry.count++;
+          const entry = confirmedCountMap.get(p.id) || { name: p.displayName, noteIds: new Set<string>() };
+          entry.noteIds.add(m.sourceId);
           confirmedCountMap.set(p.id, entry);
         }
       } else if (m.status === 'unresolved' || m.status === 'likely') {
         const name = m.rawText;
-        unconfirmedCountMap.set(name, (unconfirmedCountMap.get(name) || 0) + 1);
+        const noteIds = unconfirmedCountMap.get(name) || new Set<string>();
+        noteIds.add(m.sourceId);
+        unconfirmedCountMap.set(name, noteIds);
       }
     }
 
     // Add confirmed person patterns (at least 3 notes)
     for (const [personId, entry] of confirmedCountMap.entries()) {
-      if (entry.count >= 3 && !blockedPatternKeys.has(`person_pattern_${personId}`)) {
+      if (entry.noteIds.size >= 3 && !blockedPatternKeys.has(`person_pattern_${personId}`)) {
         insights.push({
           key: `person_pattern_${personId}`,
           name: `Interaction Pattern: ${entry.name}`,
-          description: `${entry.name} repeatedly did this. You have ${entry.count} recorded interactions.`,
-          matches: mentions
+          description: `I noticed ${entry.noteIds.size} saved Notes connected to ${entry.name}.`,
+          matches: activeMentions
             .filter(m => m.linkedPersonId === personId && m.status === 'confirmed')
-            .map(m => ({ noteId: m.sourceId, date: m.createdAt.toISOString(), quote: `...${m.rawText}...` }))
+            .filter((m, index, values) => values.findIndex((other) => other.sourceId === m.sourceId) === index)
+            .slice(0, 3)
+            .map(m => {
+              const sourceNote = activeNotes.find((note) => note.id === m.sourceId)!;
+              return {
+                noteId: m.sourceId,
+                date: sourceNote.createdAt.toISOString(),
+                boxName: boxNames.get(sourceNote.boxId) || 'Unknown Box',
+                quote: `...${m.contextBefore || ''}${m.rawText}${m.contextAfter || ''}...`,
+              };
+            })
         });
       }
     }
 
     // Add unconfirmed/unresolved patterns (uncertainty statement only!)
-    for (const [name, count] of unconfirmedCountMap.entries()) {
-      if (count >= 3 && !blockedPatternKeys.has(`person_pattern_uncertain_${name.toLowerCase()}`)) {
+    for (const [name, noteIds] of unconfirmedCountMap.entries()) {
+      if (noteIds.size >= 3 && !blockedPatternKeys.has(`person_pattern_uncertain_${name.toLowerCase()}`)) {
         insights.push({
           key: `person_pattern_uncertain_${name.toLowerCase()}`,
           name: `Unresolved Name Mentions`,
           description: `The name “${name}” appears in several Notes but has not been connected to a Person.`,
-          matches: mentions
+          matches: activeMentions
             .filter(m => m.rawText === name && (m.status === 'unresolved' || m.status === 'likely'))
-            .map(m => ({ noteId: m.sourceId, date: m.createdAt.toISOString(), quote: `...${m.rawText}...` }))
+            .filter((m, index, values) => values.findIndex((other) => other.sourceId === m.sourceId) === index)
+            .slice(0, 3)
+            .map(m => {
+              const sourceNote = activeNotes.find((note) => note.id === m.sourceId)!;
+              return {
+                noteId: m.sourceId,
+                date: sourceNote.createdAt.toISOString(),
+                boxName: boxNames.get(sourceNote.boxId) || 'Unknown Box',
+                quote: `...${m.contextBefore || ''}${m.rawText}${m.contextAfter || ''}...`,
+              };
+            })
         });
       }
     }
@@ -248,7 +280,7 @@ router.post('/dismiss', auditRoute('dismiss_pattern', 'compliance'), async (req:
 
 /**
  * POST /v1/patterns/snooze
- * Snoozes a specific pattern insight for 30 days
+ * Snoozes a specific pattern insight for 7 days
  */
 router.post('/snooze', auditRoute('snooze_pattern', 'compliance'), async (req: AuthenticatedRequest, res: Response): Promise<void> => {
   const { patternKey } = req.body;
@@ -269,7 +301,7 @@ router.post('/snooze', auditRoute('snooze_pattern', 'compliance'), async (req: A
       return;
     }
     const snoozedUntil = new Date();
-    snoozedUntil.setDate(snoozedUntil.getDate() + 30); // 30-day snooze window
+    snoozedUntil.setDate(snoozedUntil.getDate() + 7);
 
     const [entry] = await db
       .insert(dismissedPatterns)
@@ -283,7 +315,7 @@ router.post('/snooze', auditRoute('snooze_pattern', 'compliance'), async (req: A
 
     await trackEvent(userId, 'proactive_pattern_dismissed', { patternKey, snoozed: true });
 
-    res.json({ success: true, message: 'Pattern snoozed successfully for 30 days', entry });
+    res.json({ success: true, message: 'Pattern snoozed successfully for 7 days', entry });
   } catch (error) {
     logError('Pattern snooze error', error);
     res.status(500).json({ error: 'InternalServerError', message: 'Failed to snooze pattern' });

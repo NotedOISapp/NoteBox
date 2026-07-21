@@ -1,4 +1,9 @@
-import AsyncStorage from '@react-native-async-storage/async-storage';
+import {
+  getEncryptedJson,
+  removeEncryptedItem,
+  SecureLocalDataError,
+  setEncryptedJson,
+} from './secure-local-storage';
 
 export type MutationKind =
   | 'category.create'
@@ -37,14 +42,12 @@ function serialize<T>(work: () => Promise<T>): Promise<T> {
 }
 
 export async function readMutationQueue(): Promise<PendingMutation[]> {
-  const value = await AsyncStorage.getItem(MUTATION_QUEUE_KEY);
-  if (!value) return [];
-  try {
-    const parsed = JSON.parse(value);
-    return Array.isArray(parsed) ? parsed : [];
-  } catch {
-    return [];
+  const parsed = await getEncryptedJson<unknown>(MUTATION_QUEUE_KEY);
+  if (parsed === null) return [];
+  if (!Array.isArray(parsed)) {
+    throw new SecureLocalDataError('The pending mutation queue is invalid. It was preserved for recovery.', MUTATION_QUEUE_KEY);
   }
+  return parsed as PendingMutation[];
 }
 
 export async function enqueueMutation(mutation: PendingMutation): Promise<void> {
@@ -52,26 +55,20 @@ export async function enqueueMutation(mutation: PendingMutation): Promise<void> 
     const queue = await readMutationQueue();
     if (!queue.some((item) => item.id === mutation.id)) {
       queue.push(mutation);
-      await AsyncStorage.setItem(MUTATION_QUEUE_KEY, JSON.stringify(queue));
+      await setEncryptedJson(MUTATION_QUEUE_KEY, queue);
     }
   });
 }
 
 async function recordIdMapping(mapping: IdMapping): Promise<void> {
-  const raw = await AsyncStorage.getItem(ID_MAPPING_KEY);
-  const mappings: Record<string, string> = raw ? JSON.parse(raw) : {};
+  const mappings = await getEncryptedJson<Record<string, string>>(ID_MAPPING_KEY) ?? {};
   mappings[mapping.localId] = mapping.serverId;
-  await AsyncStorage.setItem(ID_MAPPING_KEY, JSON.stringify(mappings));
+  await setEncryptedJson(ID_MAPPING_KEY, mappings);
 }
 
 export async function resolveMappedId(id: string): Promise<string> {
-  const raw = await AsyncStorage.getItem(ID_MAPPING_KEY);
-  if (!raw) return id;
-  try {
-    return JSON.parse(raw)[id] || id;
-  } catch {
-    return id;
-  }
+  const mappings = await getEncryptedJson<Record<string, string>>(ID_MAPPING_KEY);
+  return mappings?.[id] || id;
 }
 
 export function drainMutationQueue(
@@ -86,9 +83,9 @@ export function drainMutationQueue(
       if (mapping) await recordIdMapping(mapping);
       const remaining = queue.slice(index + 1);
       if (remaining.length) {
-        await AsyncStorage.setItem(MUTATION_QUEUE_KEY, JSON.stringify(remaining));
+        await setEncryptedJson(MUTATION_QUEUE_KEY, remaining);
       } else {
-        await AsyncStorage.removeItem(MUTATION_QUEUE_KEY);
+        await removeEncryptedItem(MUTATION_QUEUE_KEY);
       }
     }
   }).finally(() => {
@@ -99,7 +96,7 @@ export function drainMutationQueue(
 
 export async function clearMutationQueue(): Promise<void> {
   await serialize(async () => {
-    await AsyncStorage.removeItem(MUTATION_QUEUE_KEY);
-    await AsyncStorage.removeItem(ID_MAPPING_KEY);
+    await removeEncryptedItem(MUTATION_QUEUE_KEY);
+    await removeEncryptedItem(ID_MAPPING_KEY);
   });
 }

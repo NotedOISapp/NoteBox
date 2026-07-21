@@ -89,4 +89,37 @@ describe('mobile API contract', () => {
     ]);
     expect((fetchMock.mock.calls[3][1]?.headers as Record<string, string>).Authorization).toBe('DeletionStatus deletion-token');
   });
+
+  it('sends StoreKit signed transactions to the authenticated backend sync route', async () => {
+    secureValues.set('access_token', 'access');
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(JSON.stringify({
+      claimed: [],
+      entitlement: { tier: 'paid', hasProAccess: true, capabilities: {} },
+    }), { status: 200, headers: { 'Content-Type': 'application/json' } }));
+
+    await api.storekit.sync(['signed-jws']);
+
+    expect(String(fetchMock.mock.calls[0][0])).toContain('/v1/storekit/transactions/sync');
+    expect(fetchMock.mock.calls[0][1]?.method).toBe('POST');
+    expect(JSON.parse(String(fetchMock.mock.calls[0][1]?.body))).toEqual({
+      signedTransactions: ['signed-jws'],
+    });
+  });
+
+  it('loads the stable StoreKit account-binding token from the authenticated entitlement contract', async () => {
+    secureValues.set('access_token', 'access');
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(JSON.stringify({
+      tier: 'free',
+      hasProAccess: false,
+      capabilities: {},
+        appAccountToken: '00000000-0000-4000-8000-000000000001',
+    }), { status: 200, headers: { 'Content-Type': 'application/json' } }));
+
+    await expect(api.storekit.getPurchaseContext()).resolves.toMatchObject({
+      appAccountToken: '00000000-0000-4000-8000-000000000001',
+    });
+
+    expect(String(fetchMock.mock.calls[0][0])).toContain('/v1/entitlements/me');
+    expect((fetchMock.mock.calls[0][1]?.headers as Record<string, string>).Authorization).toBe('Bearer access');
+  });
 });

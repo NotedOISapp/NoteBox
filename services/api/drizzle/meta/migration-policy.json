@@ -8,6 +8,7 @@
     "0009_promotional_entitlements",
     "0010_promotional_security_hardening",
     "0011_promotional_security_remediation",
-    "0012_durable_idempotency"
+    "0012_durable_idempotency",
+    "0013_storekit_subscription_ownership"
   ]
 }

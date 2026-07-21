@@ -2,7 +2,6 @@ import React, { useState, useEffect } from 'react';
 import { StyleSheet, Pressable, Alert, View, Platform, Switch } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
-import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as WebBrowser from 'expo-web-browser';
 import { SymbolView } from 'expo-symbols';
 import { LinearGradient } from 'expo-linear-gradient';
@@ -16,6 +15,13 @@ import { useAIConsent } from '@/components/ai-consent-modal';
 import { PaywallModal } from '@/components/paywall';
 import { api } from '@/services/api';
 import { requestAppleReauthentication } from '@/services/apple-auth';
+import {
+  authenticatePrivacyLock,
+  getPrivacyLockEnabled,
+  setPrivacyLockEnabled,
+  triggerPanicHide,
+} from '@/services/privacy-lock';
+import { getEncryptedItem, removeEncryptedItem, setEncryptedItem } from '@/services/secure-local-storage';
 
 export default function ProfileScreen() {
   const router = useRouter();
@@ -28,14 +34,44 @@ export default function ProfileScreen() {
   const [faceIdEnabled, setFaceIdEnabled] = useState(false);
   const [doNotSellEnabled, setDoNotSellEnabled] = useState(true);
   const [paywallVisible, setPaywallVisible] = useState(false);
+  const [exportStatus, setExportStatus] = useState<string | null>(null);
 
   useEffect(() => {
-    AsyncStorage.getItem('face_id_enabled').then((val) => {
-      setFaceIdEnabled(val === 'true');
-    });
-    AsyncStorage.getItem('do_not_sell_opt_out').then((val) => {
+    getPrivacyLockEnabled().then(setFaceIdEnabled);
+    getEncryptedItem('notebox_do_not_sell_opt_out').then((val) => {
       if (val !== null) setDoNotSellEnabled(val === 'true');
     });
+  }, []);
+
+  useEffect(() => {
+    let active = true;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+
+    const poll = async () => {
+      const ticketId = await getEncryptedItem('notebox_export_ticket');
+      if (!ticketId || !active) return;
+      try {
+        const response = await api.compliance.getDataExportStatus(ticketId);
+        if (!active) return;
+        setExportStatus(response.status);
+        if (response.status === 'pending' || response.status === 'processing') {
+          timer = setTimeout(() => void poll(), 5000);
+        } else if (response.status === 'failed') {
+          await removeEncryptedItem('notebox_export_ticket');
+        }
+      } catch {
+        if (active) {
+          setExportStatus('status temporarily unavailable');
+          timer = setTimeout(() => void poll(), 10000);
+        }
+      }
+    };
+
+    void poll();
+    return () => {
+      active = false;
+      if (timer) clearTimeout(timer);
+    };
   }, []);
 
   const handleHapticChange = (setting: 'Off' | 'Light' | 'Standard') => {
@@ -48,30 +84,38 @@ export default function ProfileScreen() {
   const toggleFaceId = async () => {
     triggerHaptic('micro');
     const nextState = !faceIdEnabled;
+    if (nextState && !await authenticatePrivacyLock('Enable NoteBox Privacy Lock')) {
+      Alert.alert('Security Lock Unavailable', 'Set up Face ID, Touch ID, or a device passcode before enabling the NoteBox privacy lock.');
+      return;
+    }
+    await setPrivacyLockEnabled(nextState);
     setFaceIdEnabled(nextState);
-    await AsyncStorage.setItem('face_id_enabled', nextState ? 'true' : 'false');
   };
 
   const toggleDoNotSell = async () => {
     triggerHaptic('micro');
     const nextState = !doNotSellEnabled;
-    setDoNotSellEnabled(nextState);
-    await AsyncStorage.setItem('do_not_sell_opt_out', nextState ? 'true' : 'false');
-
     try {
       if (nextState) {
         await api.compliance.optOut();
+      } else {
+        await api.compliance.updatePreferences({
+          targetedAdsAllowed: true,
+          saleOrShareAllowed: true,
+        });
       }
-    } catch (err) {
-      console.warn('Backend opt-out request failed:', err);
+      await setEncryptedItem('notebox_do_not_sell_opt_out', nextState ? 'true' : 'false');
+      setDoNotSellEnabled(nextState);
+      Alert.alert(
+        'Privacy Update',
+        nextState
+          ? 'Sale, sharing, and targeted advertising are disabled for your account.'
+          : 'You allowed sale, sharing, and targeted advertising for your account.',
+      );
+    } catch (error) {
+      console.warn('Backend privacy preference update failed:', error);
+      Alert.alert('Privacy update failed', 'Your existing privacy preference was not changed. Please try again.');
     }
-
-    Alert.alert(
-      'Privacy Update',
-      nextState
-        ? 'You have opted out of the sale or sharing of your personal data.'
-        : 'You have allowed sharing of data for analytics.'
-    );
   };
 
   const toggleAIConsent = async () => {
@@ -107,7 +151,7 @@ export default function ProfileScreen() {
     triggerHaptic('micro');
     Alert.alert(
       'Request My Data (DSAR)',
-      'Under data privacy laws (CCPA/CPRA), you have the right to request a copy of your personal data.\n\nNoteBox will package your Boxes, Notes, and profiles into a secure JSON archive.',
+      'Under data privacy laws (CCPA/CPRA), you have the right to request a copy of your personal data.\n\nNoteBox will prepare a secure ZIP export of your account data.',
       [
         { text: 'Cancel', style: 'cancel' },
         {
@@ -117,7 +161,8 @@ export default function ProfileScreen() {
             try {
               await api.auth.reauthenticate('data_export', requestAppleReauthentication);
               const exportRequest = await api.compliance.requestDataExport();
-              await AsyncStorage.setItem('notebox_export_ticket', exportRequest.ticketId);
+              await setEncryptedItem('notebox_export_ticket', exportRequest.ticketId);
+              setExportStatus('pending');
               Alert.alert(
                 'Export Queued',
                 `Your secure export is being prepared. Request ID: ${exportRequest.ticketId}`
@@ -293,6 +338,22 @@ export default function ProfileScreen() {
                   />
                 </View>
 
+                <Pressable
+                  accessibilityRole="button"
+                  accessibilityLabel="Panic Hide"
+                  onPress={() => {
+                    triggerHaptic('critical');
+                    triggerPanicHide();
+                  }}
+                  style={styles.subRowItem}
+                >
+                  <View style={{ flex: 1 }}>
+                    <ThemedText style={styles.subRowText}>Panic Hide</ThemedText>
+                    <ThemedText style={styles.toggleRowSubtitle}>Immediately cover all private content</ThemedText>
+                  </View>
+                  <SymbolView name="eye.slash.fill" size={16} tintColor="#B76E79" />
+                </Pressable>
+
                 <View style={styles.settingsToggleRow}>
                   <View style={{ flex: 1 }}>
                     <ThemedText style={styles.toggleRowTitle}>AI Perspectives Analysis</ThemedText>
@@ -352,6 +413,17 @@ export default function ProfileScreen() {
                   <ThemedText style={styles.subRowText}>Request Data Archive (JSON)</ThemedText>
                   <SymbolView name="square.and.arrow.up" size={14} tintColor="#6F6763" />
                 </Pressable>
+
+                {exportStatus && (
+                  <View style={styles.settingsToggleRow} accessibilityRole="summary">
+                    <View style={{ flex: 1 }}>
+                      <ThemedText style={styles.toggleRowTitle}>Data archive status</ThemedText>
+                      <ThemedText style={styles.toggleRowSubtitle}>
+                        {exportStatus === 'ready' ? 'Your archive is ready for authenticated download.' : exportStatus}
+                      </ThemedText>
+                    </View>
+                  </View>
+                )}
 
                 <Pressable onPress={() => handleOpenLink('https://notebox.app/privacy')} style={styles.subRowItem}>
                   <ThemedText style={styles.subRowText}>Privacy Policy</ThemedText>

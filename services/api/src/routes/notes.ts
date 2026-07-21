@@ -10,13 +10,14 @@ import {
   addMores,
   people,
   notePeople,
+  receipts,
   boxes,
   personMentions,
   mentionCandidates,
   clarificationQuestions,
   clarificationOptions
 } from '../db/schema.js';
-import { eq, and, isNull, desc } from 'drizzle-orm';
+import { eq, and, isNull, desc, inArray, sql } from 'drizzle-orm';
 import { encrypt, decrypt } from '../utils/crypto.js';
 import { auditRoute } from '../middleware/audit.js';
 import { trackEvent } from '../utils/telemetry.js';
@@ -92,10 +93,23 @@ router.get('/', async (req: AuthenticatedRequest, res: Response) => {
       .where(conditions)
       .orderBy(desc(notes.createdAt));
 
+    const receiptCountRows = allNotes.length === 0
+      ? []
+      : await db
+        .select({
+          noteId: receipts.noteId,
+          count: sql<number>`count(*)::int`,
+        })
+        .from(receipts)
+        .where(and(eq(receipts.userId, userId), inArray(receipts.noteId, allNotes.map((note) => note.id))))
+        .groupBy(receipts.noteId);
+    const receiptCounts = new Map(receiptCountRows.map((row) => [row.noteId, Number(row.count)]));
+
     // Decrypt note bodies
     const decryptedNotes = allNotes.map((note) => ({
       ...note,
       body: decrypt(note.body),
+      receiptsCount: receiptCounts.get(note.id) || 0,
     }));
 
     // If search query is provided, filter in memory
@@ -297,6 +311,7 @@ router.post('/', auditRoute('create_note', 'note'), validateRequest({ body: crea
     const responsePayload = {
       ...newNote,
       body: rawContent, // return plain text to client
+      receiptsCount: 0,
       clarifications: pipelineResult.questions
     };
 
@@ -351,9 +366,15 @@ router.get('/:id', validateRequest({ params: idParamSchema }), async (req: Authe
       .innerJoin(people, eq(notePeople.personId, people.id))
       .where(eq(notePeople.noteId, note.id));
 
+    const [receiptCount] = await db
+      .select({ count: sql<number>`count(*)::int` })
+      .from(receipts)
+      .where(and(eq(receipts.noteId, note.id), eq(receipts.userId, userId)));
+
     res.json({
       ...note,
       body: decrypt(note.body),
+      receiptsCount: Number(receiptCount?.count || 0),
       versions: versions.map((v) => ({
         ...v,
         body: decrypt(v.body),

@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useState } from 'react';
 import { Alert, StyleSheet, View, Pressable, Modal, ScrollView, Platform } from 'react-native';
 import * as WebBrowser from 'expo-web-browser';
 import { ThemedText } from './themed-text';
@@ -7,6 +7,11 @@ import { useTheme } from '@/hooks/use-theme';
 import { useHaptics } from '@/hooks/use-haptics';
 import { Spacing } from '@/constants/theme';
 import { useEntitlements } from '@/context/EntitlementContext';
+import {
+  isStoreKitUserCancellation,
+  purchaseNoteBoxSubscription,
+  restoreNoteBoxSubscription,
+} from '@/services/storekit';
 
 interface PaywallProps {
   visible: boolean;
@@ -17,14 +22,49 @@ export function PaywallModal({ visible, onClose }: PaywallProps) {
   const theme = useTheme();
   const { triggerHaptic } = useHaptics();
   const { refresh, isLoading } = useEntitlements();
+  const [storeKitAction, setStoreKitAction] = useState<'purchase' | 'restore' | null>(null);
 
-  const handleRefreshAccess = async () => {
+  const handlePurchase = async () => {
     triggerHaptic('micro');
+    if (Platform.OS !== 'ios') {
+      Alert.alert('Available on iPhone', 'NoteBox subscriptions are purchased through the App Store on iOS.');
+      return;
+    }
+    setStoreKitAction('purchase');
     try {
+      await purchaseNoteBoxSubscription();
       await refresh();
-      Alert.alert('Access Refreshed', 'Your membership now matches the status verified by NoteBox.');
+      Alert.alert('Welcome to NoteBox Pro', 'Your purchase was verified and your membership is active.');
+      onClose();
+    } catch (error) {
+      if (!isStoreKitUserCancellation(error)) {
+        Alert.alert('Purchase Not Completed', 'NoteBox could not verify this purchase. You were not granted paid access.');
+      }
+    } finally {
+      setStoreKitAction(null);
+    }
+  };
+
+  const handleRestore = async () => {
+    triggerHaptic('micro');
+    if (Platform.OS !== 'ios') {
+      Alert.alert('Available on iPhone', 'Purchase restoration is available through the App Store on iOS.');
+      return;
+    }
+    setStoreKitAction('restore');
+    try {
+      const result = await restoreNoteBoxSubscription();
+      await refresh();
+      if (result.restoredCount === 0) {
+        Alert.alert('No Purchase Found', 'The App Store did not find an active NoteBox Pro purchase for this Apple ID.');
+        return;
+      }
+      Alert.alert('Purchases Restored', 'Your App Store purchase was verified and your membership is active.');
+      onClose();
     } catch {
-      Alert.alert('Unable to Refresh', 'NoteBox could not verify a purchase or trial. Your access was not changed.');
+      Alert.alert('Unable to Restore', 'NoteBox could not verify an active App Store purchase. Your access was not changed.');
+    } finally {
+      setStoreKitAction(null);
     }
   };
 
@@ -150,26 +190,26 @@ export function PaywallModal({ visible, onClose }: PaywallProps) {
           {/* Action buttons */}
           <View style={styles.buttonContainer}>
             <Pressable
-              onPress={handleRefreshAccess}
-              disabled={isLoading}
+              onPress={handlePurchase}
+              disabled={isLoading || storeKitAction !== null}
               style={[styles.button, { backgroundColor: theme.roseGoldDark }]}
             >
               <ThemedText type="smallBold" style={styles.buttonText}>
-                {isLoading ? 'Checking Access…' : 'Check Current Access'}
+                {storeKitAction === 'purchase' ? 'Contacting App Store…' : 'Start App Store Purchase'}
               </ThemedText>
             </Pressable>
 
             {/* COMPLIANCE RULE: Restore Purchases must have equal tap target weight */}
             <Pressable
-              onPress={handleRefreshAccess}
-              disabled={isLoading}
+              onPress={handleRestore}
+              disabled={isLoading || storeKitAction !== null}
               style={[
                 styles.button,
                 { backgroundColor: theme.backgroundElement, borderWidth: 1, borderColor: theme.roseGoldDark }
               ]}
             >
               <ThemedText type="smallBold" style={[styles.buttonText, { color: theme.roseGoldDark }]}>
-                Refresh Verified Membership
+                {storeKitAction === 'restore' ? 'Restoring Purchases…' : 'Restore Purchases'}
               </ThemedText>
             </Pressable>
           </View>

@@ -5,6 +5,15 @@ import { Platform } from 'react-native';
 import * as SecureStore from 'expo-secure-store';
 import { requestAppleReauthentication } from '@/services/apple-auth';
 import { clearMutationQueue, drainMutationQueue, enqueueMutation, PendingMutation, resolveMappedId } from '@/services/offline-queue';
+import NetInfo from '@react-native-community/netinfo';
+import {
+  clearLocalEncryptionKey,
+  getEncryptedItem,
+  getEncryptedJson,
+  removeEncryptedItem,
+  setEncryptedItem,
+  setEncryptedJson,
+} from '@/services/secure-local-storage';
 
 export interface Category {
   id: string;
@@ -65,7 +74,7 @@ interface AppContextType {
   deleteNote: (id: string) => Promise<void>;
   editNote: (id: string, body: string) => Promise<void>;
   addMoreToNote: (noteId: string, body: string) => Promise<void>;
-  addPerson: (name: string) => Promise<void>;
+  addPerson: (name: string) => Promise<string>;
   addCategory: (name: string) => Promise<string>;
   isAuthenticated: boolean;
   ageAttested: boolean;
@@ -96,10 +105,10 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const [isAuthenticated, setIsAuthenticated] = useState<boolean>(false);
   const [ageAttested, setAgeAttested] = useState<boolean>(false);
 
-  // Save changes to AsyncStorage whenever state updates
+  // Domain data is encrypted before it is written to the AsyncStorage backing store.
   const saveLocal = useCallback(async (key: string, data: any) => {
     try {
-      await AsyncStorage.setItem(key, JSON.stringify(data));
+      await setEncryptedJson(key, data);
     } catch (e) {
       console.warn('Failed to save to local storage', e);
     }
@@ -108,11 +117,9 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const removeBoxDraft = async (boxId: string) => {
     const key = 'notebox_draft_box_' + boxId;
     try {
-      if (Platform.OS === 'web') {
-        await AsyncStorage.removeItem(key);
-      } else {
-        await SecureStore.deleteItemAsync(key);
-      }
+      await removeEncryptedItem(key);
+      // Remove the pre-encryption SecureStore draft if this device has one.
+      if (Platform.OS !== 'web') await SecureStore.deleteItemAsync(key);
     } catch (e) {
       console.warn('Failed to delete draft:', e);
     }
@@ -183,8 +190,9 @@ export function AppProvider({ children }: { children: ReactNode }) {
         }
         case 'note.create': {
           const boxId = await resolveMappedId(payload.boxId);
+          const peopleIds = await Promise.all((payload.peopleIds as string[]).map(resolveMappedId));
           const serverNote = await api.notes.create(boxId, payload.body, payload.peopleNames, mutation.id);
-          const mapped: Note = { ...serverNote, boxId, peopleIds: payload.peopleIds, receiptsCount: payload.receiptsCount };
+          const mapped: Note = { ...serverNote, boxId, peopleIds, receiptsCount: payload.receiptsCount };
           setNotes((previous) => {
             const next = previous.map((item) => item.id === payload.tempId ? mapped : item);
             saveLocal('notebox_notes', next);
@@ -200,10 +208,10 @@ export function AppProvider({ children }: { children: ReactNode }) {
             saveLocal('notebox_add_mores', next);
             return next;
           });
-          const receipts = await AsyncStorage.getItem(`note_receipts_${payload.tempId}`);
+          const receipts = await getEncryptedItem(`note_receipts_${payload.tempId}`);
           if (receipts !== null) {
-            await AsyncStorage.setItem(`note_receipts_${serverNote.id}`, receipts);
-            await AsyncStorage.removeItem(`note_receipts_${payload.tempId}`);
+            await setEncryptedItem(`note_receipts_${serverNote.id}`, receipts);
+            await removeEncryptedItem(`note_receipts_${payload.tempId}`);
           }
           return { localId: payload.tempId, serverId: serverNote.id };
         }
@@ -293,38 +301,36 @@ export function AppProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     const loadCache = async () => {
       try {
-        const storedBoxes = await AsyncStorage.getItem('notebox_boxes');
-        const storedCategories = await AsyncStorage.getItem('notebox_categories');
-        const storedAreas = await AsyncStorage.getItem('notebox_areas');
-        const storedNotes = await AsyncStorage.getItem('notebox_notes');
-        const storedPeople = await AsyncStorage.getItem('notebox_people');
-        const storedAddMores = await AsyncStorage.getItem('notebox_add_mores');
-        const storedPerspectives = await AsyncStorage.getItem('notebox_perspectives');
+        const storedBoxes = await getEncryptedJson<Box[]>('notebox_boxes');
+        const storedCategories = await getEncryptedJson<Category[]>('notebox_categories');
+        const storedAreas = await getEncryptedJson<Category[]>('notebox_areas');
+        const storedNotes = await getEncryptedJson<Note[]>('notebox_notes');
+        const storedPeople = await getEncryptedJson<Person[]>('notebox_people');
+        const storedAddMores = await getEncryptedJson<Record<string, AddMoreBlock[]>>('notebox_add_mores');
+        const storedPerspectives = await getEncryptedJson<Record<string, AIPerspective>>('notebox_perspectives');
         const storedHaptic = await AsyncStorage.getItem('hapticSetting');
 
         if (storedBoxes) {
-          const parsedBoxes = JSON.parse(storedBoxes);
-          const mappedBoxes = parsedBoxes.map((b: any) => ({
+          const mappedBoxes = storedBoxes.map((b) => ({
             ...b,
-            categoryId: b.categoryId || b.areaId,
+            categoryId: b.categoryId || (b as Box & { areaId?: string }).areaId,
           }));
           setBoxes(mappedBoxes);
         }
 
         if (storedCategories) {
-          setCategories(JSON.parse(storedCategories));
+          setCategories(storedCategories);
         } else if (storedAreas) {
-          const parsedAreas = JSON.parse(storedAreas);
-          setCategories(parsedAreas);
-          await saveLocal('notebox_categories', parsedAreas);
-          await AsyncStorage.removeItem('notebox_areas');
+          setCategories(storedAreas);
+          await saveLocal('notebox_categories', storedAreas);
+          await removeEncryptedItem('notebox_areas');
         } else {
           await saveLocal('notebox_categories', []);
         }
-        if (storedNotes) setNotes(JSON.parse(storedNotes));
-        if (storedPeople) setPeople(JSON.parse(storedPeople));
-        if (storedAddMores) setAddMores(JSON.parse(storedAddMores));
-        if (storedPerspectives) setPerspectives(JSON.parse(storedPerspectives));
+        if (storedNotes) setNotes(storedNotes);
+        if (storedPeople) setPeople(storedPeople);
+        if (storedAddMores) setAddMores(storedAddMores);
+        if (storedPerspectives) setPerspectives(storedPerspectives);
         if (storedHaptic === 'Standard' || storedHaptic === 'Light' || storedHaptic === 'Off') {
           setHapticSettingState(storedHaptic);
         }
@@ -354,6 +360,14 @@ export function AppProvider({ children }: { children: ReactNode }) {
     };
     loadCache();
   }, [syncWithBackend, saveLocal]);
+
+  useEffect(() => NetInfo.addEventListener((state) => {
+    if (state.isConnected && state.isInternetReachable !== false && isAuthenticated && ageAttested) {
+      void syncWithBackend().catch((error) => {
+        console.warn('Reconnection sync failed; queued changes remain preserved.', error);
+      });
+    }
+  }), [ageAttested, isAuthenticated, syncWithBackend]);
 
   const setHapticSetting = async (setting: 'Standard' | 'Light' | 'Off') => {
     setHapticSettingState(setting);
@@ -414,6 +428,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
       );
       await AsyncStorage.multiRemove(keysToClear);
       await clearMutationQueue();
+      await clearLocalEncryptionKey();
 
       // Reset local state to defaults
       setBoxes([]);
@@ -632,14 +647,14 @@ export function AppProvider({ children }: { children: ReactNode }) {
 
     await enqueueMutation({ id: localId(), kind: 'person.create', createdAt: new Date().toISOString(), payload: { tempId, name } });
     await flushMutationQueue().catch(() => undefined);
+    return resolveMappedId(tempId);
   };
 
   const regeneratePerspectives = async (noteId: string, intensity: 'mild' | 'bold' | 'savage', scope?: 'single_note' | 'box_history' | 'people_across_boxes') => {
     const consentKey = ['ai', 'consent', 'granted'].join('_');
     const hasConsent = await AsyncStorage.getItem(consentKey);
     if (hasConsent !== 'true') {
-      console.log('AI consent not granted. Skipping API request.');
-      return;
+      throw new Error('AI consent is required before a Perspective can be generated.');
     }
     try {
       const aiData = await api.perspectives.generate(noteId, intensity, scope);

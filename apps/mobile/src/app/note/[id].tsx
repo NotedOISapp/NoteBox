@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useCallback, useEffect, useState } from 'react';
 import { StyleSheet, Pressable, TextInput, Modal, Alert, Clipboard, Share, View, ScrollView, Platform } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useLocalSearchParams, useRouter } from 'expo-router';
@@ -10,11 +10,13 @@ import { useApp } from '@/context/AppContext';
 import { useEntitlements } from '@/context/EntitlementContext';
 import { useHaptics } from '@/hooks/use-haptics';
 import { PaywallModal } from '@/components/paywall';
+import * as DocumentPicker from 'expo-document-picker';
+import { api, ReceiptOcrResponse, ReceiptRecord } from '@/services/api';
 
 export default function NoteDetailScreen() {
   const { id } = useLocalSearchParams();
   const router = useRouter();
-  const { notes, boxes, addMores, perspectives, addMoreToNote, deleteNote, editNote } = useApp();
+  const { notes, boxes, addMores, perspectives, addMoreToNote, deleteNote, editNote, regeneratePerspectives, syncWithBackend } = useApp();
   const { plan } = useEntitlements();
   const { triggerHaptic } = useHaptics();
 
@@ -32,8 +34,89 @@ export default function NoteDetailScreen() {
   const [expandedPerspective, setExpandedPerspective] = useState<'Aligned' | 'Objective' | 'Unfiltered' | null>(null);
   const [selectedIntensity, setSelectedIntensity] = useState<'Mild' | 'Bold' | 'Savage'>('Bold');
   const [showPaywall, setShowPaywall] = useState(false);
+  const [receipts, setReceipts] = useState<ReceiptRecord[]>([]);
+  const [receiptStatus, setReceiptStatus] = useState<Record<string, ReceiptOcrResponse>>({});
+  const [isLoadingReceipts, setIsLoadingReceipts] = useState(false);
+  const [isGeneratingPerspective, setIsGeneratingPerspective] = useState(false);
 
-  const note = notes.find(n => n.id === id);
+  const noteId = Array.isArray(id) ? id[0] : id;
+  const note = notes.find(n => n.id === noteId);
+
+  const loadReceipts = useCallback(async () => {
+    if (!noteId || noteId.startsWith('local_')) return;
+    setIsLoadingReceipts(true);
+    try {
+      const records = await api.receipts.list(noteId);
+      setReceipts(records);
+    } catch (error: any) {
+      Alert.alert('Receipts unavailable', error?.message || 'Please try again.');
+    } finally {
+      setIsLoadingReceipts(false);
+    }
+  }, [noteId]);
+
+  useEffect(() => {
+    if (activeTab === 'receipts') void loadReceipts();
+  }, [activeTab, loadReceipts]);
+
+  const attachReceipt = async () => {
+    if (!noteId || noteId.startsWith('local_')) {
+      Alert.alert('Connect to attach', 'This Note must finish syncing before a Receipt can be attached.');
+      return;
+    }
+    const result = await DocumentPicker.getDocumentAsync({
+      type: ['application/pdf', 'image/*'],
+      copyToCacheDirectory: true,
+      multiple: false,
+    });
+    if (result.canceled) return;
+    const asset = result.assets[0];
+    try {
+      await api.receipts.upload(noteId, {
+        uri: asset.uri,
+        contentType: asset.mimeType || 'application/octet-stream',
+      });
+      await Promise.all([loadReceipts(), syncWithBackend()]);
+      triggerHaptic('success');
+    } catch (error: any) {
+      Alert.alert('Receipt not attached', error?.message || 'Please try again.');
+    }
+  };
+
+  const requestOcr = async (receiptId: string) => {
+    try {
+      const status = await api.receipts.requestOcr(receiptId);
+      setReceiptStatus((current) => ({ ...current, [receiptId]: status }));
+      if (status.status === 'processing') {
+        Alert.alert('Security scan in progress', 'Text extraction can begin after this Receipt passes its security scan.');
+      } else if (status.status === 'unavailable') {
+        Alert.alert('Text extraction unavailable', 'No text was created. The Receipt remains attached.');
+      } else if (status.status === 'blocked') {
+        Alert.alert('Receipt blocked', 'This Receipt did not pass its security scan.');
+      }
+    } catch (error: any) {
+      Alert.alert('Text not extracted', error?.message || 'Please try again.');
+    }
+  };
+
+  const removeReceipt = (receiptId: string) => {
+    Alert.alert('Delete Receipt', 'Delete this Receipt and any extracted text?', [
+      { text: 'Cancel', style: 'cancel' },
+      {
+        text: 'Delete',
+        style: 'destructive',
+        onPress: async () => {
+          try {
+            await api.receipts.delete(receiptId);
+            setReceipts((current) => current.filter((receipt) => receipt.id !== receiptId));
+            await syncWithBackend();
+          } catch (error: any) {
+            Alert.alert('Receipt not deleted', error?.message || 'Please try again.');
+          }
+        },
+      },
+    ]);
+  };
 
   if (!note) {
     return (
@@ -48,10 +131,19 @@ export default function NoteDetailScreen() {
 
   const box = boxes.find(b => b.id === note.boxId);
   const noteAddMores = addMores[note.id] || [];
-  const notePerspectives = perspectives[note.id] || {
-    aligned: "That would hurt. Anyone in your position would feel shaken by that.",
-    objective: "From the outside, the key question is what happened, what changed, and what can be verified.",
-    unfiltered: "This was not confusion. It was a choice. And you are the one carrying the cost.",
+  const notePerspectives = perspectives[note.id];
+
+  const generatePerspective = async () => {
+    if (isGeneratingPerspective) return;
+    setIsGeneratingPerspective(true);
+    try {
+      await regeneratePerspectives(note.id, selectedIntensity.toLowerCase() as 'mild' | 'bold' | 'savage');
+      triggerHaptic('success');
+    } catch (error: any) {
+      Alert.alert('Perspective not generated', error?.message || 'Please try again.');
+    } finally {
+      setIsGeneratingPerspective(false);
+    }
   };
 
   const handleAddMoreSave = () => {
@@ -198,31 +290,55 @@ export default function NoteDetailScreen() {
 
           {activeTab === 'receipts' && (
             <View style={styles.tabContentInner}>
-              {note.receiptsCount === 0 ? (
+              {isLoadingReceipts ? (
+                <View style={styles.emptyTabInner}>
+                  <ThemedText style={styles.emptyTabText}>Loading Receipts…</ThemedText>
+                </View>
+              ) : receipts.length === 0 ? (
                 <View style={styles.emptyTabInner}>
                   <SymbolView name="paperclip" size={32} tintColor="#D8CEC7" />
                   <ThemedText style={styles.emptyTabText}>No receipts attached to this Note.</ThemedText>
+                  <Pressable onPress={attachReceipt} style={styles.extractBtn}>
+                    <ThemedText style={styles.extractBtnText}>Attach Receipt</ThemedText>
+                  </Pressable>
                 </View>
               ) : (
                 <ScrollView style={{ flex: 1 }} contentContainerStyle={{ gap: 12 }}>
-                  <ThemedText style={styles.receiptsInfoText}>Attached Receipts ({note.receiptsCount})</ThemedText>
-                  {Array.from({ length: note.receiptsCount }).map((_, idx) => (
-                    <View key={idx} style={styles.receiptItemRow}>
+                  <View style={styles.receiptSectionHeader}>
+                    <ThemedText style={styles.receiptsInfoText}>Attached Receipts ({receipts.length})</ThemedText>
+                    <Pressable onPress={attachReceipt} style={styles.extractBtn}>
+                      <ThemedText style={styles.extractBtnText}>Add</ThemedText>
+                    </Pressable>
+                  </View>
+                  {receipts.map((receipt) => {
+                    const ocr = receiptStatus[receipt.id];
+                    return (
+                    <View key={receipt.id} style={styles.receiptItemRow}>
                       <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10 }}>
                         <SymbolView name="doc.plaintext" size={20} tintColor="#6F6763" />
-                        <View>
-                          <ThemedText style={styles.receiptName}>receipt_record_{idx + 1}.pdf</ThemedText>
-                          <ThemedText style={styles.receiptMeta}>PDF • 1.4 MB</ThemedText>
+                        <View style={{ flex: 1 }}>
+                          <ThemedText style={styles.receiptName}>{receipt.contentType}</ThemedText>
+                          <ThemedText style={styles.receiptMeta}>
+                            {(Number(receipt.sizeBytes) / 1024).toFixed(1)} KB · Scan {receipt.scanStatus}
+                          </ThemedText>
+                          {ocr?.status === 'ready' && (
+                            <ThemedText style={styles.receiptMeta} numberOfLines={3}>{ocr.text}</ThemedText>
+                          )}
                         </View>
                       </View>
-                      <Pressable
-                        onPress={() => Alert.alert('Extract OCR', 'OCR Text successfully extracted under secure local cache.')}
-                        style={styles.extractBtn}
-                      >
-                        <ThemedText style={styles.extractBtnText}>Extract</ThemedText>
-                      </Pressable>
+                      <View style={styles.receiptActions}>
+                        <Pressable onPress={() => requestOcr(receipt.id)} style={styles.extractBtn}>
+                          <ThemedText style={styles.extractBtnText}>
+                            {ocr?.status === 'ready' ? 'Refresh text' : 'Extract text'}
+                          </ThemedText>
+                        </Pressable>
+                        <Pressable onPress={() => removeReceipt(receipt.id)} style={styles.deleteReceiptBtn}>
+                          <ThemedText style={styles.deleteReceiptText}>Delete</ThemedText>
+                        </Pressable>
+                      </View>
                     </View>
-                  ))}
+                    );
+                  })}
                 </ScrollView>
               )}
             </View>
@@ -230,6 +346,16 @@ export default function NoteDetailScreen() {
 
           {activeTab === 'perspectives' && (
             <View style={styles.tabContentInner}>
+              {!notePerspectives ? (
+                <View style={styles.emptyTabInner}>
+                  <ThemedText style={styles.emptyTabText}>No Perspective has been generated for this Note.</ThemedText>
+                  <Pressable disabled={isGeneratingPerspective} onPress={() => void generatePerspective()} style={styles.regenBtn}>
+                    <ThemedText style={styles.regenBtnText}>
+                      {isGeneratingPerspective ? 'Generating…' : 'Generate Perspective'}
+                    </ThemedText>
+                  </Pressable>
+                </View>
+              ) : (
               <ScrollView style={{ flex: 1 }} contentContainerStyle={{ gap: 12 }} showsVerticalScrollIndicator={false}>
                 {/* Aligned card */}
                 <Pressable
@@ -273,6 +399,7 @@ export default function NoteDetailScreen() {
                   </ThemedText>
                 </Pressable>
               </ScrollView>
+              )}
             </View>
           )}
 
@@ -377,14 +504,10 @@ export default function NoteDetailScreen() {
             <ScrollView style={{ flex: 1, marginVertical: Spacing.two }} showsVerticalScrollIndicator={false}>
               <ThemedText style={styles.expandedPerspectiveText}>
                 {expandedPerspective === 'Aligned'
-                  ? notePerspectives.aligned
+                  ? notePerspectives?.aligned || ''
                   : expandedPerspective === 'Objective'
-                  ? notePerspectives.objective
-                  : selectedIntensity === 'Mild'
-                  ? "[Mild] The situation suggests conscious actions rather than simple mistakes."
-                  : selectedIntensity === 'Savage'
-                  ? "[Savage] STOP DEFENDING BEHAVIOR THAT CLEARLY HAPENS AT YOUR EXPENSE."
-                  : notePerspectives.unfiltered}
+                  ? notePerspectives?.objective || ''
+                  : notePerspectives?.unfiltered || ''}
               </ThemedText>
             </ScrollView>
 
@@ -427,10 +550,11 @@ export default function NoteDetailScreen() {
             {/* Regen action buttons */}
             <View style={styles.regenButtonsRow}>
               <Pressable
-                onPress={() => Alert.alert('Regenerate', 'AI Perspective successfully regenerated with new tone parameter.')}
+                onPress={() => void generatePerspective()}
+                disabled={isGeneratingPerspective}
                 style={styles.regenBtn}
               >
-                <ThemedText style={styles.regenBtnText}>Say it differently</ThemedText>
+                <ThemedText style={styles.regenBtnText}>{isGeneratingPerspective ? 'Generating…' : 'Say it differently'}</ThemedText>
               </Pressable>
             </View>
           </View>
@@ -615,6 +739,11 @@ const styles = StyleSheet.create({
     color: '#2E2A28',
     marginBottom: 6,
   },
+  receiptSectionHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+  },
   receiptItemRow: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -636,11 +765,28 @@ const styles = StyleSheet.create({
   extractBtn: {
     backgroundColor: '#B76E79',
     paddingHorizontal: 12,
-    paddingVertical: 6,
-    borderRadius: 12,
+    minHeight: 44,
+    justifyContent: 'center',
+    borderRadius: 22,
   },
   extractBtnText: {
     color: '#FFF',
+    fontSize: 11,
+    fontWeight: 'bold',
+  },
+  receiptActions: {
+    alignItems: 'stretch',
+    gap: 6,
+    marginLeft: 8,
+  },
+  deleteReceiptBtn: {
+    minHeight: 44,
+    justifyContent: 'center',
+    alignItems: 'center',
+    paddingHorizontal: 12,
+  },
+  deleteReceiptText: {
+    color: '#9A3647',
     fontSize: 11,
     fontWeight: 'bold',
   },

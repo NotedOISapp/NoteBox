@@ -1,6 +1,6 @@
-import { useEffect, useState } from 'react';
+import { ReactNode, useCallback, useEffect, useRef, useState } from 'react';
 import { DarkTheme, DefaultTheme, ThemeProvider } from '@react-navigation/native';
-import { AppState, AppStateStatus, Platform, StyleSheet, View, useColorScheme } from 'react-native';
+import { AppState, AppStateStatus, Platform, Pressable, StyleSheet, View, useColorScheme } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { useFonts } from 'expo-font';
 import * as SplashScreen from 'expo-splash-screen';
@@ -26,6 +26,7 @@ import { AIConsentProvider } from '@/components/ai-consent-modal';
 import OnboardingScreen from './onboarding';
 import SignInScreen from '@/components/sign-in';
 import AgeGateScreen from './age-gate';
+import { authenticatePrivacyLock, getPrivacyLockEnabled, subscribeToPanicHide } from '@/services/privacy-lock';
 
 // Prevent splash screen auto hide
 SplashScreen.preventAutoHideAsync().catch(() => {
@@ -34,7 +35,6 @@ SplashScreen.preventAutoHideAsync().catch(() => {
 
 export default function TabLayout() {
   const colorScheme = useColorScheme();
-  const [isBackgrounded, setIsBackgrounded] = useState(false);
   const [isOnboardingCompleted, setIsOnboardingCompleted] = useState<boolean | null>(null);
 
   // Load custom fonts asynchronously
@@ -53,17 +53,6 @@ export default function TabLayout() {
     AsyncStorage.getItem('onboarding_completed').then((val) => {
       setIsOnboardingCompleted(val === 'true');
     });
-  }, []);
-
-  useEffect(() => {
-    const handleAppStateChange = (nextAppState: AppStateStatus) => {
-      setIsBackgrounded(nextAppState === 'inactive' || nextAppState === 'background');
-    };
-
-    const subscription = AppState.addEventListener('change', handleAppStateChange);
-    return () => {
-      subscription.remove();
-    };
   }, []);
 
   const isAsyncStorageReady = isOnboardingCompleted !== null;
@@ -88,25 +77,102 @@ export default function TabLayout() {
           <AIConsentProvider>
             <AnimatedSplashOverlay />
 
-            <RootContent
-              isOnboardingCompleted={isOnboardingCompleted}
-              setIsOnboardingCompleted={setIsOnboardingCompleted}
-            />
-
-            {isBackgrounded && (
-              <View style={[
-                styles.overlay,
-                { backgroundColor: colorScheme === 'dark' ? 'rgba(46, 42, 40, 0.85)' : 'rgba(246, 242, 239, 0.85)' }
-              ]}>
-                <ThemedText type="subtitle" style={styles.overlayText}>
-                  NoteBox
-                </ThemedText>
-              </View>
-            )}
+            <PrivacyGuard>
+              <RootContent
+                isOnboardingCompleted={isOnboardingCompleted}
+                setIsOnboardingCompleted={setIsOnboardingCompleted}
+              />
+            </PrivacyGuard>
           </AIConsentProvider>
         </EntitlementProvider>
       </AppProvider>
     </ThemeProvider>
+  );
+}
+
+function PrivacyGuard({ children }: { children: ReactNode }) {
+  const colorScheme = useColorScheme();
+  const { isAuthenticated, logout } = useApp();
+  const [isLocked, setIsLocked] = useState(false);
+  const [isUnlocking, setIsUnlocking] = useState(false);
+  const [privacyChecked, setPrivacyChecked] = useState(false);
+  const unlockInFlight = useRef(false);
+
+  const unlock = useCallback(async () => {
+    if (!isAuthenticated || unlockInFlight.current) return;
+    unlockInFlight.current = true;
+    setIsUnlocking(true);
+    try {
+      if (await authenticatePrivacyLock()) setIsLocked(false);
+    } finally {
+      unlockInFlight.current = false;
+      setIsUnlocking(false);
+    }
+  }, [isAuthenticated]);
+
+  useEffect(() => subscribeToPanicHide(() => setIsLocked(true)), []);
+
+  useEffect(() => {
+    if (!isAuthenticated) {
+      setIsLocked(false);
+      setPrivacyChecked(false);
+      return;
+    }
+
+    let mounted = true;
+    void getPrivacyLockEnabled().then((enabled) => {
+      if (!mounted) return;
+      setIsLocked(enabled);
+      setPrivacyChecked(true);
+      if (enabled) void unlock();
+    });
+
+    let currentState = AppState.currentState;
+    const subscription = AppState.addEventListener('change', async (nextState: AppStateStatus) => {
+      const returningToForeground = currentState !== 'active' && nextState === 'active';
+      currentState = nextState;
+
+      if (nextState === 'inactive' || nextState === 'background') {
+        if (await getPrivacyLockEnabled()) setIsLocked(true);
+      } else if (returningToForeground && await getPrivacyLockEnabled()) {
+        setIsLocked(true);
+        void unlock();
+      }
+    });
+
+    return () => {
+      mounted = false;
+      subscription.remove();
+    };
+  }, [isAuthenticated, unlock]);
+
+  const shouldCoverPrivateContent = isAuthenticated && (!privacyChecked || isLocked);
+
+  return (
+    <View style={styles.guardContainer}>
+      {(!isAuthenticated || privacyChecked) && children}
+      {shouldCoverPrivateContent && (
+        <View style={[
+          styles.overlay,
+          { backgroundColor: colorScheme === 'dark' ? '#2E2A28' : '#F6F2EF' },
+        ]}>
+          <ThemedText type="subtitle" style={styles.overlayText}>NoteBox</ThemedText>
+          <ThemedText type="small" themeColor="textSecondary">Private content is hidden.</ThemedText>
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel="Unlock NoteBox"
+            disabled={isUnlocking || !privacyChecked}
+            onPress={() => void unlock()}
+            style={styles.unlockButton}
+          >
+            <ThemedText style={styles.unlockButtonText}>{!privacyChecked || isUnlocking ? 'Checking…' : 'Unlock'}</ThemedText>
+          </Pressable>
+          <Pressable accessibilityRole="button" onPress={() => void logout()}>
+            <ThemedText type="small" themeColor="textSecondary">Sign Out</ThemedText>
+          </Pressable>
+        </View>
+      )}
+    </View>
   );
 }
 
@@ -147,6 +213,9 @@ function RootContent({ isOnboardingCompleted, setIsOnboardingCompleted }: RootCo
 }
 
 const styles = StyleSheet.create({
+  guardContainer: {
+    flex: 1,
+  },
   overlay: {
     ...StyleSheet.absoluteFillObject,
     justifyContent: 'center',
@@ -158,5 +227,19 @@ const styles = StyleSheet.create({
     fontWeight: Platform.select({ web: '700', default: undefined }),
     letterSpacing: 2,
     opacity: 0.8,
+  },
+  unlockButton: {
+    minHeight: 48,
+    minWidth: 180,
+    borderRadius: 24,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#B76E79',
+    marginTop: 24,
+    marginBottom: 12,
+  },
+  unlockButtonText: {
+    color: '#FFFFFF',
+    fontWeight: '600',
   },
 });

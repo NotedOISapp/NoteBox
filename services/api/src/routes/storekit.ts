@@ -1,7 +1,7 @@
 import { Router, Response } from 'express';
 import { AuthenticatedRequest } from '../middleware/auth.js';
 import { claimPromotionalTransactions, MAX_STOREKIT_TRANSACTIONS_PER_REQUEST } from '../services/storekitClaimService.js';
-import { getEffectiveEntitlement } from '../services/entitlementResolver.js';
+import { syncStoreKitTransactions } from '../services/storekitSyncService.js';
 
 const router = Router();
 
@@ -64,7 +64,7 @@ router.post('/sync', async (req: AuthenticatedRequest, res: Response): Promise<v
       return;
     }
 
-    const claimResult = await claimPromotionalTransactions({
+    const claimResult = await syncStoreKitTransactions({
       authenticatedUserId: userId,
       signedTransactions,
     });

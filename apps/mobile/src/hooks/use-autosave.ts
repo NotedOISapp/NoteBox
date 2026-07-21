@@ -1,31 +1,19 @@
 import { useEffect, useRef, useState } from 'react';
-import { AppState, AppStateStatus, Platform } from 'react-native';
-import * as SecureStore from 'expo-secure-store';
-import AsyncStorage from '@react-native-async-storage/async-storage';
+import { AppState, AppStateStatus } from 'react-native';
+import { getEncryptedItem, removeEncryptedItem, setEncryptedItem } from '@/services/secure-local-storage';
 
 const DRAFT_KEY_PREFIX = 'notebox_draft_';
 
-const isWeb = Platform.OS === 'web';
-
 const getDraftItem = async (key: string): Promise<string | null> => {
-  if (isWeb) {
-    return AsyncStorage.getItem(key);
-  }
-  return SecureStore.getItemAsync(key);
+  return getEncryptedItem(key);
 };
 
 const setDraftItem = async (key: string, value: string): Promise<void> => {
-  if (isWeb) {
-    return AsyncStorage.setItem(key, value);
-  }
-  return SecureStore.setItemAsync(key, value);
+  return setEncryptedItem(key, value);
 };
 
 const removeDraftItem = async (key: string): Promise<void> => {
-  if (isWeb) {
-    return AsyncStorage.removeItem(key);
-  }
-  return SecureStore.deleteItemAsync(key);
+  return removeEncryptedItem(key);
 };
 
 export function useAutosave(draftId: string, initialValue: string = '') {

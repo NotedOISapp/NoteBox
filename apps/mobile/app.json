@@ -28,6 +28,21 @@
     "plugins": [
       "expo-router",
       "expo-apple-authentication",
+      "react-native-iap",
+      [
+        "expo-local-authentication",
+        {
+          "faceIDPermission": "Allow NoteBox to use Face ID to unlock your private Notes."
+        }
+      ],
+      [
+        "expo-image-picker",
+        {
+          "photosPermission": "Allow NoteBox to choose screenshots and Receipt images to attach to your Notes.",
+          "cameraPermission": false,
+          "microphonePermission": false
+        }
+      ],
       [
         "expo-splash-screen",
         {

@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { StyleSheet, Pressable, Modal, Alert, TextInput, View, Platform, ScrollView, Dimensions } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useLocalSearchParams, useRouter } from 'expo-router';
@@ -7,6 +7,7 @@ import { SymbolView } from 'expo-symbols';
 import { ThemedText } from '@/components/themed-text';
 import { Spacing } from '@/constants/theme';
 import { useApp } from '@/context/AppContext';
+import { api } from '@/services/api';
 import { useHaptics } from '@/hooks/use-haptics';
 import { PaywallModal } from '@/components/paywall';
 
@@ -25,10 +26,44 @@ export default function BoxDetailScreen() {
 
   const [selectedPersonFilter, setSelectedPersonFilter] = useState<string | null>(null);
   const [searchQuery, setSearchQuery] = useState('');
+  const [searchResultIds, setSearchResultIds] = useState<string[] | null>(null);
+  const [searchError, setSearchError] = useState<string | null>(null);
   const [sortOrder, setSortOrder] = useState<'newest' | 'oldest'>('newest');
   const [showPaywall, setShowPaywall] = useState(false);
 
   const box = boxes.find(b => b.id === id);
+
+  useEffect(() => {
+    const query = searchQuery.trim();
+    if (!query || !box?.id) {
+      setSearchResultIds(null);
+      setSearchError(null);
+      return;
+    }
+
+    let cancelled = false;
+    const timer = setTimeout(async () => {
+      try {
+        const response = await api.search.query(query, { boxId: box.id, limit: 50 });
+        if (!cancelled) {
+          setSearchResultIds([...new Set(response.results.flatMap((result) => result.noteId ? [result.noteId] : []))]);
+          setSearchError(null);
+        }
+      } catch (error) {
+        if (!cancelled) {
+          setSearchResultIds([]);
+          setSearchError(typeof error === 'object' && error && 'message' in error
+            ? String(error.message)
+            : 'Search could not be completed.');
+        }
+      }
+    }, 300);
+
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [box?.id, searchQuery]);
 
   if (!box) {
     return (
@@ -49,9 +84,7 @@ export default function BoxDetailScreen() {
   const filteredNotes = boxNotes
     .filter(n => {
       if (selectedPersonFilter && !n.peopleIds.includes(selectedPersonFilter)) return false;
-      if (searchQuery.trim() !== '') {
-        return n.body.toLowerCase().includes(searchQuery.toLowerCase());
-      }
+      if (searchQuery.trim() !== '') return searchResultIds?.includes(n.id) ?? false;
       return true;
     })
     .sort((a, b) => {
@@ -139,6 +172,9 @@ export default function BoxDetailScreen() {
             style={styles.searchInput}
           />
         </View>
+        {searchError && (
+          <ThemedText type="small" style={{ color: '#B76E79' }}>{searchError}</ThemedText>
+        )}
 
         {/* People Chips filtering row */}
         {boxPeople.length > 0 && (

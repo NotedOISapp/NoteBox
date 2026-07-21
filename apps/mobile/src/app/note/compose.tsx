@@ -10,12 +10,19 @@ import { useApp } from '@/context/AppContext';
 import { useEntitlements } from '@/context/EntitlementContext';
 import { useAutosave } from '@/hooks/use-autosave';
 import { useHaptics } from '@/hooks/use-haptics';
+import * as DocumentPicker from 'expo-document-picker';
+import * as ImagePicker from 'expo-image-picker';
+import { api, ReceiptUploadAsset } from '@/services/api';
+
+interface PendingAttachment extends ReceiptUploadAsset {
+  name: string;
+}
 
 export default function NoteComposerScreen() {
   const router = useRouter();
   const { boxId } = useLocalSearchParams<{ boxId?: string }>();
   const theme = useTheme();
-  const { boxes, people, addNote, notes, addPerson } = useApp();
+  const { boxes, people, addNote, notes, addPerson, syncWithBackend } = useApp();
   const { plan, limits } = useEntitlements();
   const { triggerHaptic } = useHaptics();
 
@@ -25,8 +32,8 @@ export default function NoteComposerScreen() {
   const [showBoxPicker, setShowBoxPicker] = useState(false);
   const [showPeoplePicker, setShowPeoplePicker] = useState(false);
   const [showLockedModal, setShowLockedModal] = useState(false);
-  const [hasReceipt, setHasReceipt] = useState(false);
-  const [hasScreenshot, setHasScreenshot] = useState(false);
+  const [attachments, setAttachments] = useState<PendingAttachment[]>([]);
+  const [isSubmitting, setIsSubmitting] = useState(false);
   const [newPersonName, setNewPersonName] = useState('');
 
   // Autosave draft setup
@@ -70,12 +77,86 @@ export default function NoteComposerScreen() {
     performSave();
   };
 
+  const addAttachment = (attachment: PendingAttachment) => {
+    const maxAttachments = plan === 'free' ? 3 : 10;
+    setAttachments((current) => {
+      if (current.length >= maxAttachments) {
+        Alert.alert('Receipt limit reached', `This plan allows up to ${maxAttachments} Receipts on one Note.`);
+        return current;
+      }
+      return [...current, attachment];
+    });
+  };
+
+  const pickScreenshot = async () => {
+    const permission = await ImagePicker.requestMediaLibraryPermissionsAsync();
+    if (!permission.granted) {
+      Alert.alert('Photos access needed', 'Allow Photos access to attach a screenshot.');
+      return;
+    }
+    const result = await ImagePicker.launchImageLibraryAsync({ mediaTypes: ['images'], quality: 1 });
+    if (!result.canceled) {
+      const asset = result.assets[0];
+      addAttachment({
+        uri: asset.uri,
+        name: asset.fileName || 'screenshot.jpg',
+        contentType: asset.mimeType || 'image/jpeg',
+      });
+      triggerHaptic('micro');
+    }
+  };
+
+  const pickReceipt = async () => {
+    const result = await DocumentPicker.getDocumentAsync({
+      type: ['application/pdf', 'image/*'],
+      copyToCacheDirectory: true,
+      multiple: false,
+    });
+    if (!result.canceled) {
+      const asset = result.assets[0];
+      addAttachment({
+        uri: asset.uri,
+        name: asset.name,
+        contentType: asset.mimeType || 'application/octet-stream',
+      });
+      triggerHaptic('micro');
+    }
+  };
+
   const performSave = async () => {
-    const receiptsCount = (hasReceipt ? 1 : 0) + (hasScreenshot ? 1 : 0);
-    const savedNoteId = addNote(selectedBoxId, draftText, selectedPeopleIds, receiptsCount);
-    await triggerHaptic('success');
-    await discardDraft();
-    router.replace(`/note/${savedNoteId}`);
+    if (isSubmitting) return;
+    setIsSubmitting(true);
+    try {
+      const savedNoteId = await addNote(selectedBoxId, draftText, selectedPeopleIds, 0);
+      let failedUploads = 0;
+
+      if (attachments.length > 0 && savedNoteId.startsWith('local_')) {
+        failedUploads = attachments.length;
+      } else {
+        for (const attachment of attachments) {
+          try {
+            await api.receipts.upload(savedNoteId, attachment);
+          } catch {
+            failedUploads += 1;
+          }
+        }
+      }
+
+      if (attachments.length > failedUploads) await syncWithBackend();
+      await triggerHaptic(failedUploads === 0 ? 'success' : 'warning');
+      await discardDraft();
+      router.replace(`/note/${savedNoteId}`);
+      if (failedUploads > 0) {
+        Alert.alert(
+          'Note saved; attachment not added',
+          `${failedUploads} selected file${failedUploads === 1 ? '' : 's'} could not be uploaded. Reconnect and attach again from the Note.`,
+        );
+      }
+    } catch (error: any) {
+      Alert.alert('Note not saved', error?.message || 'Please try again.');
+    } finally {
+      setIsSubmitting(false);
+    }
   };
 
   const togglePersonTag = (id: string) => {
@@ -87,7 +168,7 @@ export default function NoteComposerScreen() {
     }
   };
 
-  const handleAddPerson = () => {
+  const handleAddPerson = async () => {
     const name = newPersonName.trim();
     if (!name) return;
 
@@ -102,10 +183,7 @@ export default function NoteComposerScreen() {
       return;
     }
 
-    // Add to state and context
-    addPerson(name);
-    // Since addPerson appends, the new ID is people.length + 1
-    const newId = String(people.length + 1);
+    const newId = await addPerson(name);
     setSelectedPeopleIds([...selectedPeopleIds, newId]);
     setNewPersonName('');
     triggerHaptic('success');
@@ -140,36 +218,24 @@ export default function NoteComposerScreen() {
           style={[styles.textInput, { color: theme.text }]}
         />
 
-        {/* Attachment & Tag Toggles */}
+        {/* Attachment and people actions */}
         <ThemedView style={styles.actionToolbar}>
           <Pressable
-            onPress={() => { setHasScreenshot(!hasScreenshot); triggerHaptic('micro'); }}
-            style={[
-              styles.toolbarButton,
-              {
-                backgroundColor: hasScreenshot ? theme.backgroundSelected + '22' : theme.backgroundElement,
-                borderColor: hasScreenshot ? theme.roseGoldDark : 'transparent',
-              }
-            ]}
+            onPress={pickScreenshot}
+            accessibilityLabel="Choose a screenshot to attach"
+            accessibilityRole="button"
+            style={[styles.toolbarButton, { backgroundColor: theme.backgroundElement }]}
           >
-            <ThemedText type="small" style={hasScreenshot && { color: theme.roseGoldDark, fontWeight: '700' }}>
-              🖼️ Screenshot {hasScreenshot && '✓'}
-            </ThemedText>
+            <ThemedText type="small">Screenshot</ThemedText>
           </Pressable>
 
           <Pressable
-            onPress={() => { setHasReceipt(!hasReceipt); triggerHaptic('micro'); }}
-            style={[
-              styles.toolbarButton,
-              {
-                backgroundColor: hasReceipt ? theme.backgroundSelected + '22' : theme.backgroundElement,
-                borderColor: hasReceipt ? theme.roseGoldDark : 'transparent',
-              }
-            ]}
+            onPress={pickReceipt}
+            accessibilityLabel="Choose a Receipt to attach"
+            accessibilityRole="button"
+            style={[styles.toolbarButton, { backgroundColor: theme.backgroundElement }]}
           >
-            <ThemedText type="small" style={hasReceipt && { color: theme.roseGoldDark, fontWeight: '700' }}>
-              📎 Receipt {hasReceipt && '✓'}
-            </ThemedText>
+            <ThemedText type="small">Receipt</ThemedText>
           </Pressable>
 
           <Pressable
@@ -188,12 +254,29 @@ export default function NoteComposerScreen() {
           </Pressable>
         </ThemedView>
 
+        {attachments.length > 0 && (
+          <ThemedView style={styles.attachmentList}>
+            {attachments.map((attachment, index) => (
+              <Pressable
+                key={`${attachment.uri}-${index}`}
+                onPress={() => setAttachments((current) => current.filter((_, itemIndex) => itemIndex !== index))}
+                accessibilityLabel={`Remove ${attachment.name}`}
+                accessibilityRole="button"
+                style={[styles.attachmentChip, { backgroundColor: theme.backgroundSelected }]}
+              >
+                <ThemedText type="small" numberOfLines={1}>{attachment.name} · Remove</ThemedText>
+              </Pressable>
+            ))}
+          </ThemedView>
+        )}
+
         {/* Primary Save Action */}
         <Pressable
           onPress={handleSave}
-          style={[styles.saveCTA, { backgroundColor: theme.roseGoldDark }]}
+          disabled={isSubmitting}
+          style={[styles.saveCTA, { backgroundColor: theme.roseGoldDark, opacity: isSubmitting ? 0.65 : 1 }]}
         >
-          <ThemedText style={styles.saveText}>Save Note</ThemedText>
+          <ThemedText style={styles.saveText}>{isSubmitting ? 'Saving…' : 'Save Note'}</ThemedText>
         </Pressable>
 
         {/* Box Picker Modal */}
@@ -369,12 +452,24 @@ const styles = StyleSheet.create({
     paddingVertical: Spacing.two,
   },
   toolbarButton: {
-    minHeight: 40,
+    minHeight: 44,
     justifyContent: 'center',
     paddingHorizontal: Spacing.three,
     borderRadius: 20,
     borderWidth: 1.5,
     borderColor: 'transparent',
+  },
+  attachmentList: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: Spacing.two,
+  },
+  attachmentChip: {
+    minHeight: 44,
+    maxWidth: '100%',
+    justifyContent: 'center',
+    borderRadius: 22,
+    paddingHorizontal: Spacing.three,
   },
   saveCTA: {
     minHeight: 48,

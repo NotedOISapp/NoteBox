@@ -1,8 +1,9 @@
 import { Router, Request, Response } from 'express';
-import { and, eq, inArray, or, sql } from 'drizzle-orm';
+import { and, eq, inArray, lte, or, sql } from 'drizzle-orm';
 import { db } from '../db/index.js';
 import {
   storekitTransactions,
+  subscriptions,
   promotionalGrants,
   appStoreNotifications,
   storekitTransactionTombstones,
@@ -116,6 +117,21 @@ router.post('/apple/app-store', async (req: Request, res: Response): Promise<voi
           revokedAt: verifiedTransaction.revokedAt ?? new Date(),
           updatedAt: new Date(),
         }).where(inArray(promotionalGrants.transactionId, transactionIds));
+        if (
+          verifiedTransaction.productKind === 'subscription'
+          && verifiedTransaction.originalTransactionId
+          && verifiedTransaction.expiresAt
+        ) {
+          await tx.update(subscriptions).set({
+            status: 'refunded',
+            autoRenew: false,
+            updatedAt: new Date(),
+          }).where(and(
+            eq(subscriptions.platform, 'apple'),
+            eq(subscriptions.originalTxnId, verifiedTransaction.originalTransactionId),
+            lte(subscriptions.currentPeriodEnd, verifiedTransaction.expiresAt),
+          ));
+        }
       } else {
         await tx.insert(storekitTransactionTombstones).values({
           transactionId: verifiedTransaction.transactionId,

@@ -240,7 +240,10 @@ export const subscriptions = pgTable('subscriptions', {
   autoRenew: boolean('auto_renew').default(true).notNull(),
   createdAt: timestamp('created_at').defaultNow().notNull(),
   updatedAt: timestamp('updated_at').defaultNow().notNull(),
-});
+}, (t) => ({
+  platformOriginalTxnUnique: uniqueIndex('subscriptions_platform_original_txn_unique')
+    .on(t.platform, t.originalTxnId),
+}));
 
 export const entitlements = pgTable('entitlements', {
   id: uuid('id').primaryKey().defaultRandom(),

@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { StyleSheet, ScrollView, TextInput, Pressable, Platform, View, Modal } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
@@ -10,14 +10,20 @@ import { useTheme } from '@/hooks/use-theme';
 import { useApp } from '@/context/AppContext';
 import { useHaptics } from '@/hooks/use-haptics';
 import { useEntitlements } from '@/context/EntitlementContext';
+import { SearchResults } from '@/components/search-results';
+import { api, SearchMatch } from '@/services/api';
 
 export default function HomeScreen() {
   const router = useRouter();
   const theme = useTheme();
-  const { boxes, notes, people, addBox } = useApp();
+  const { boxes, notes, addBox } = useApp();
   const { triggerHaptic } = useHaptics();
   const { plan } = useEntitlements();
   const [searchQuery, setSearchQuery] = useState('');
+  const [searchResults, setSearchResults] = useState<SearchMatch[]>([]);
+  const [searchLoading, setSearchLoading] = useState(false);
+  const [searchError, setSearchError] = useState<string | null>(null);
+  const [searchAttempt, setSearchAttempt] = useState(0);
 
   const [showCreateModal, setShowCreateModal] = useState(false);
   const [showLimitModal, setShowLimitModal] = useState(false);
@@ -70,39 +76,43 @@ export default function HomeScreen() {
     }
   };
 
-  // Filter boxes & notes based on search query
-  const searchLower = searchQuery.toLowerCase();
+  const filteredBoxes = activeBoxes;
+  const recentNotes = notes.filter(n => n.boxId === selectedBoxId);
 
-  // People matching search query
-  const matchingPeopleIds = people
-    .filter(p => p.name.toLowerCase().includes(searchLower))
-    .map(p => p.id);
+  useEffect(() => {
+    const query = searchQuery.trim();
+    if (!query) {
+      setSearchResults([]);
+      setSearchError(null);
+      setSearchLoading(false);
+      return;
+    }
 
-  const filteredBoxes = activeBoxes.filter(box => {
-    if (!searchQuery) return true;
+    let cancelled = false;
+    setSearchLoading(true);
+    setSearchError(null);
+    const timer = setTimeout(async () => {
+      try {
+        const response = await api.search.query(query, { limit: 50 });
+        if (!cancelled) setSearchResults(response.results);
+      } catch (error) {
+        if (!cancelled) {
+          const message = typeof error === 'object' && error && 'message' in error
+            ? String(error.message)
+            : 'Search could not be completed.';
+          setSearchError(message);
+          setSearchResults([]);
+        }
+      } finally {
+        if (!cancelled) setSearchLoading(false);
+      }
+    }, 300);
 
-    // Check box name matches
-    const nameMatches = box.name.toLowerCase().includes(searchLower);
-
-    // Check if notes in this box match query or tagged people match query
-    const hasMatchingNote = notes.some(note =>
-      note.boxId === box.id && (
-        note.body.toLowerCase().includes(searchLower) ||
-        note.peopleIds.some(pid => matchingPeopleIds.includes(pid))
-      )
-    );
-
-    return nameMatches || hasMatchingNote;
-  });
-
-  // Recent notes from the selected box, filtered by search query if present
-  const recentNotes = notes
-    .filter(n => n.boxId === selectedBoxId)
-    .filter(note => {
-      if (!searchQuery) return true;
-      return note.body.toLowerCase().includes(searchLower) ||
-        note.peopleIds.some(pid => matchingPeopleIds.includes(pid));
-    });
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [searchAttempt, searchQuery]);
 
   // Helper to format date
   const formatDate = (isoString: string) => {
@@ -110,7 +120,7 @@ export default function HomeScreen() {
     return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
   };
 
-  const showCarousel = filteredBoxes.length > 0 || !searchQuery;
+  const showCarousel = filteredBoxes.length > 0;
 
   return (
     <ThemedView style={styles.container}>
@@ -128,16 +138,20 @@ export default function HomeScreen() {
             placeholder="Search your Boxes"
             placeholderTextColor={theme.textSecondary}
             value={searchQuery}
-            onChangeText={(text) => {
-              setSearchQuery(text);
-              if (text && filteredBoxes.length > 0) {
-                setSelectedBoxId(filteredBoxes[0].id);
-              }
-            }}
+            onChangeText={setSearchQuery}
             style={[styles.searchInput, { color: theme.text }]}
           />
         </ThemedView>
 
+        {searchQuery.trim() ? (
+          <SearchResults
+            query={searchQuery}
+            results={searchResults}
+            isLoading={searchLoading}
+            error={searchError}
+            onRetry={() => setSearchAttempt((attempt) => attempt + 1)}
+          />
+        ) : (
         <ScrollView showsVerticalScrollIndicator={false} style={styles.contentScroll}>
           {/* Horizontal Carousel */}
           <ThemedView style={styles.section}>
@@ -237,7 +251,7 @@ export default function HomeScreen() {
             ) : recentNotes.length === 0 ? (
               <ThemedView type="backgroundElement" style={styles.emptyBoxNotes}>
                 <ThemedText type="small" themeColor="textSecondary">
-                  {searchQuery ? "No matching notes in this Box." : "Nothing in this Box yet."}
+                  Nothing in this Box yet.
                 </ThemedText>
               </ThemedView>
             ) : (
@@ -282,6 +296,7 @@ export default function HomeScreen() {
             )}
           </ThemedView>
         </ScrollView>
+        )}
 
         {/* Floating Add Note Action */}
         <Pressable

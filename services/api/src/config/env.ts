@@ -63,6 +63,17 @@ if (storeKitEnvironmentValue !== 'Sandbox' && storeKitEnvironmentValue !== 'Prod
   throw new Error('Critical Config Error: APPLE_STOREKIT_ENVIRONMENT must be Sandbox or Production.');
 }
 export const APPLE_STOREKIT_ENVIRONMENT: 'Sandbox' | 'Production' = storeKitEnvironmentValue;
+const subscriptionProductIdsValue = process.env.APPLE_SUBSCRIPTION_PRODUCT_IDS
+  || (isProd ? '' : 'com.notebox.pro.monthly');
+export const APPLE_SUBSCRIPTION_PRODUCT_IDS = [...new Set(
+  subscriptionProductIdsValue
+    .split(',')
+    .map((productId) => productId.trim())
+    .filter(Boolean),
+)];
+if (APPLE_SUBSCRIPTION_PRODUCT_IDS.some((productId) => !/^[A-Za-z0-9][A-Za-z0-9._-]{1,254}$/.test(productId))) {
+  throw new Error('Critical Config Error: APPLE_SUBSCRIPTION_PRODUCT_IDS contains an invalid App Store product ID.');
+}
 export const APPLE_ROOT_CERTIFICATES_PATH = process.env.APPLE_ROOT_CERTIFICATES_PATH || '';
 export const APPLE_STOREKIT_ENABLE_ONLINE_CHECKS = process.env.APPLE_STOREKIT_ENABLE_ONLINE_CHECKS === 'true';
 export const APPLE_CLIENT_ID = process.env.APPLE_CLIENT_ID || (isProd ? '' : 'com.notebox.app');
@@ -118,6 +129,9 @@ if (isProd) {
   }
   if (APPLE_STOREKIT_ENVIRONMENT !== 'Production') {
     throw new Error('Production Guardrail Violation: APPLE_STOREKIT_ENVIRONMENT must be "Production" in production mode.');
+  }
+  if (APPLE_SUBSCRIPTION_PRODUCT_IDS.length === 0) {
+    throw new Error('Production Guardrail Violation: APPLE_SUBSCRIPTION_PRODUCT_IDS must contain at least one configured subscription product ID.');
   }
   if (!APPLE_ROOT_CERTIFICATES_PATH) {
     throw new Error('Production Guardrail Violation: APPLE_ROOT_CERTIFICATES_PATH must be set in production.');

@@ -14,6 +14,9 @@ Object.assign(process.env, environment);
 const { initStorage } = await import('../src/compliance/storage.js');
 await initStorage();
 
+const { generateTestPerspectives } = await import('./fixtures/perspectiveTestGenerator.js');
+(globalThis as any).__noteboxPerspectiveTestGenerator = generateTestPerspectives;
+
 const { setTestVerificationAdapters } = await import('../src/services/storekitVerification.js');
 setTestVerificationAdapters({
   verifyTransactionJws: async (signedPayload: string) => {

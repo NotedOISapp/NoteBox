@@ -15,7 +15,7 @@ This manifest records the reviewed content imported into the clean publication r
 | --- | --- | --- | --- | --- | --- |
 | `.easignore`, `.gitignore` | Repository | `f26e7bb` | Configuration | Packaging and repository hygiene | Included |
 | `.env.example` | API | Public `main`/`f26e7bb` identical | Configuration | Placeholder-only environment contract | Included; disclosure scan required |
-| `.github/` | Repository | `f26e7bb` | Workflow/governance | CI and ownership rules | Included; CODEOWNER identity remains a publication gate |
+| `.github/` | Repository | `f26e7bb` | Workflow/governance | CI and ownership rules | Included; `@NotedOISapp` identity confirmed July 21, 2026 |
 | `AGENTS.md` | Repository | `f26e7bb` | Governance | Canonical engineering constraints | Included |
 | `README.md` | Repository | `f26e7bb` | Documentation | Canonical workspace entry point | Included with corrected repository-relative release link |
 | `NoteBox v1 Master Handoff.md` | Product | `f26e7bb` | Documentation pointer | Points to the editable canonical specification | Included |
@@ -25,7 +25,7 @@ This manifest records the reviewed content imported into the clean publication r
 | `docs/design/` | Mobile | `f26e7bb` | Documentation | Current design specification | Included |
 | `docs/qa/QA_SHIP_BLOCKERS.md` | QA | Public `main`/`f26e7bb` identical | Documentation | User-observable release blockers | Relocated without content loss |
 | `docs/release/` | Release | `f26e7bb` | Documentation | App-store, release, and GitHub gates | Included with this manifest |
-| `apps/mobile/` | Mobile | `f26e7bb` | Source, assets, tests, lockfile | Canonical mobile application | Included; functional blockers remain below |
+| `apps/mobile/` | Mobile | `f26e7bb` plus recovery fixes | Source, assets, tests, lockfile | Canonical mobile application | Included; simulated and client-only flows listed below were replaced or made fail-closed |
 | `services/api/` | API | `f26e7bb` | Source, migrations, tests, lockfile | Canonical backend application | Included |
 | `scripts/` | Repository | `f26e7bb` | Verification tooling | Repository, lockfile, migration, and test-classification gates | Included |
 | `package.json`, `package-lock.json` | Repository | `f26e7bb` | Orchestration and lockfile | Canonical root commands using independent npm projects | Included |
@@ -64,18 +64,36 @@ This manifest records the reviewed content imported into the clean publication r
 
 No legacy branch or commit is to be cherry-picked into this repository.
 
-## Functional publication blockers
+## Functional recovery results
 
-The source snapshot is the most complete reconciled tree, but import is not proof of release readiness. Before public push, verification must resolve or explicitly obtain product approval for:
+The recovery branch now includes:
 
-- Native StoreKit purchase and restore behavior.
-- Real receipt attachment and OCR request/error behavior instead of simulated success.
-- Backend-backed Patterns and canonical Search integration.
-- Enforced privacy lock and secure local-data persistence.
-- Export and deletion status polling and recovery.
-- Canonical Categories/plus/Profile bottom navigation and route-guard interaction tests.
-- Entitlement copy and regeneration-limit alignment.
-- Docker-backed API integration tests, migrations, clean build, lint, typecheck, mobile tests, and smoke checks.
+- Native StoreKit purchase and restore with backend verification before transaction completion, server allowlists, subscription ownership, replay protection, refund handling, and `appAccountToken` binding.
+- Real Receipt/Screenshot selection, authorized binary upload, confirmation, canonical listing/deletion, and explicit OCR processing/blocked/unavailable/ready states. No fabricated file or OCR success remains.
+- Backend-backed Patterns and one canonical Search endpoint covering Box titles, Notes, Add More context, People, and explicitly stored clean OCR text.
+- Device privacy lock, panic hide, encrypted authenticated local domain storage, corruption preservation, encrypted offline mutation queues, and reconnect draining.
+- Stable export and account-deletion polling contracts and client recovery.
+- Canonical Categories/Add Note/Profile navigation and corrected async Note/Person identity handling.
+- Server-enforced StoreKit/entitlement behavior, canonical Perspective generation, and removal of fabricated Perspective fallbacks.
+
+## Verification evidence
+
+Verified on July 21, 2026 with Node 22.22.0 and npm 10.9.x:
+
+- `npm run verify`: passed.
+- Repository governance, secret-placeholder, package-lock, test-classification, migration, and repository-integrity checks: passed.
+- Mobile lint and TypeScript: passed.
+- Mobile tests: 7 files, 26 tests passed.
+- API lint, TypeScript build, and unit tests: passed; 6 files, 58 tests.
+- Docker/Testcontainers integration tests: passed; 23 files, 160 tests.
+- Migration integrity: 14 ordered migrations (5 generated, 9 manual).
+- Expo SDK dependency compatibility: passed.
+- API production dependency audit: 0 findings.
+- Mobile production dependency audit: no high or critical findings. Fourteen moderate findings remain in the Expo SDK 54 build/configuration dependency chain; npm's available remediation is the coordinated Expo SDK 57 upgrade, which is intentionally a separate platform-upgrade change rather than an automatic recovery patch. CI rejects any future high or critical production advisory.
+
+## Deployment prerequisites outside source control
+
+Repository publication does not supply production credentials or third-party console configuration. StoreKit activation still requires matching App Store Connect product and bundle/app identifiers, production Apple root certificates, App Store Server Notifications V2, and the Sign in with Apple team/key/private-key settings documented in the environment examples. These values must remain outside Git.
 
 ## Publication gate
 

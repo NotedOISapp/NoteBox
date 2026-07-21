@@ -6,13 +6,14 @@ import { AuthenticatedRequest, authMiddleware } from '../middleware/auth.js';
 import { db } from '../db/index.js';
 import {
   receipts,
+  ocrTexts,
   notes,
   privacyPreferences,
   users,
   uploadReservations,
 } from '../db/schema.js';
 import { and, eq, ne, sql } from 'drizzle-orm';
-import { encrypt } from '../utils/crypto.js';
+import { decrypt } from '../utils/crypto.js';
 import { auditRoute } from '../middleware/audit.js';
 import { trackEvent } from '../utils/telemetry.js';
 import { eligibilityMiddleware } from '../middleware/eligibility.js';
@@ -34,6 +35,7 @@ const uploadUrlSchema = z.object({
   sha256: z.string().regex(/^[a-fA-F0-9]{64}$/).optional(),
 });
 const confirmReceiptSchema = z.object({ reservationId: z.string().uuid() });
+const listReceiptsQuerySchema = z.object({ noteId: z.string().uuid().optional() });
 
 router.use(authMiddleware);
 router.use(eligibilityMiddleware);
@@ -42,9 +44,24 @@ function normalizeContentType(value: string): string {
   return value.split(';', 1)[0].trim().toLowerCase();
 }
 
-router.get('/', async (req: AuthenticatedRequest, res: Response) => {
+router.get('/', validateRequest({ query: listReceiptsQuerySchema }), async (req: AuthenticatedRequest, res: Response) => {
   try {
-    const rows = await db.select().from(receipts).where(eq(receipts.userId, req.user!.userId));
+    const noteId = req.query.noteId as string | undefined;
+    if (noteId) {
+      const [note] = await db.select({ id: notes.id }).from(notes).where(and(
+        eq(notes.id, noteId),
+        eq(notes.userId, req.user!.userId),
+        sql`${notes.deletedAt} IS NULL`,
+      )).limit(1);
+      if (!note) {
+        res.status(404).json({ error: 'NOTE_NOT_FOUND', message: 'Note not found.' });
+        return;
+      }
+    }
+    const rows = await db.select().from(receipts).where(and(
+      eq(receipts.userId, req.user!.userId),
+      ...(noteId ? [eq(receipts.noteId, noteId)] : []),
+    ));
     res.json(rows.map((receipt) => ({ ...receipt, sizeBytes: receipt.sizeBytes.toString() })));
   } catch (error) {
     logError('Error fetching receipts', error);
@@ -300,6 +317,74 @@ router.delete('/:id', auditRoute('delete_receipt', 'receipt'), validateRequest({
   }
 });
 
+router.get('/:id/ocr', validateRequest({ params: idParamSchema }), async (req: AuthenticatedRequest, res: Response) => {
+  res.setHeader('Cache-Control', 'no-store');
+  try {
+    const [receipt] = await db.select().from(receipts).where(and(
+      eq(receipts.id, req.params.id as string),
+      eq(receipts.userId, req.user!.userId),
+    )).limit(1);
+    if (!receipt) { res.status(404).json({ error: 'NotFoundError' }); return; }
+
+    const [ocr] = await db.select().from(ocrTexts)
+      .where(eq(ocrTexts.receiptId, receipt.id))
+      .limit(1);
+    if (ocr) {
+      res.json({
+        receiptId: receipt.id,
+        status: 'ready',
+        text: decrypt(ocr.extractedText),
+        extractedAt: ocr.createdAt,
+      });
+      return;
+    }
+
+    if (receipt.scanStatus === 'pending') {
+      res.json({
+        receiptId: receipt.id,
+        status: 'processing',
+        stage: 'security_scan',
+        retryAfterSeconds: 5,
+      });
+      return;
+    }
+    if (receipt.scanStatus === 'rejected') {
+      res.json({
+        receiptId: receipt.id,
+        status: 'blocked',
+        reason: 'RECEIPT_REJECTED',
+      });
+      return;
+    }
+    res.json({
+      receiptId: receipt.id,
+      status: 'unavailable',
+      reason: 'OCR_PROVIDER_UNAVAILABLE',
+    });
+  } catch (error) {
+    logError('OCR status request failed', error);
+    res.status(500).json({ error: 'InternalServerError' });
+  }
+});
+
+router.delete('/:id/ocr', auditRoute('delete_ocr_text', 'receipt'), validateRequest({ params: idParamSchema }), async (req: AuthenticatedRequest, res: Response) => {
+  const userId = req.user!.userId;
+  try {
+    const [receipt] = await db.select().from(receipts).where(and(
+      eq(receipts.id, req.params.id as string),
+      eq(receipts.userId, userId),
+    )).limit(1);
+    if (!receipt) { res.status(404).json({ error: 'NotFoundError' }); return; }
+
+    await db.delete(ocrTexts).where(eq(ocrTexts.receiptId, receipt.id));
+    await trackEvent(userId, 'ocr_text_deleted', { receiptId: receipt.id });
+    res.json({ success: true, status: 'not_requested' });
+  } catch (error) {
+    logError('OCR text deletion failed', error);
+    res.status(500).json({ error: 'InternalServerError' });
+  }
+});
+
 router.post('/:id/ocr', validateRequest({ params: idParamSchema }), async (req: AuthenticatedRequest, res: Response) => {
   const userId = req.user!.userId;
   try {
@@ -312,13 +397,40 @@ router.post('/:id/ocr', validateRequest({ params: idParamSchema }), async (req: 
     if (!preferences?.aiProcessingAllowed) {
       res.status(403).json({ error: 'ConsentRequired' }); return;
     }
-    if (receipt.scanStatus !== 'clean') {
-      res.status(409).json({ error: 'RECEIPT_NOT_READY', message: 'Receipt must pass scanning before OCR.' });
+    if (receipt.scanStatus === 'pending') {
+      res.status(202).json({
+        receiptId: receipt.id,
+        status: 'processing',
+        stage: 'security_scan',
+        retryAfterSeconds: 5,
+      });
+      return;
+    }
+    if (receipt.scanStatus === 'rejected') {
+      res.status(422).json({
+        error: 'RECEIPT_REJECTED',
+        status: 'blocked',
+        message: 'This Receipt cannot be processed.',
+      });
+      return;
+    }
+
+    const [existing] = await db.select().from(ocrTexts)
+      .where(eq(ocrTexts.receiptId, receipt.id))
+      .limit(1);
+    if (existing) {
+      res.json({
+        receiptId: receipt.id,
+        status: 'ready',
+        text: decrypt(existing.extractedText),
+        extractedAt: existing.createdAt,
+      });
       return;
     }
     await trackEvent(userId, 'ocr_extract_unavailable', { receiptId: receipt.id });
     res.status(503).json({
       error: 'OCR_UNAVAILABLE',
+      status: 'unavailable',
       message: 'Text extraction is currently unavailable. No OCR text was created.',
     });
   } catch (error) {

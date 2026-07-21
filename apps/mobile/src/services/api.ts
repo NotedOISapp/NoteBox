@@ -9,6 +9,75 @@ export interface AppleCredentialPayload {
   displayName?: string | null;
 }
 
+export interface SearchMatch {
+  resultType?: 'note' | 'box';
+  noteId: string | null;
+  boxId: string;
+  boxName: string;
+  matchType: 'note_body' | 'add_more' | 'ocr_text' | 'box_title';
+  snippet: string;
+  createdAt: string;
+}
+
+export interface SearchResponse {
+  success: true;
+  query: string;
+  totalCount: number;
+  page: number;
+  limit: number;
+  totalPages: number;
+  results: SearchMatch[];
+}
+
+export interface PatternMatch {
+  noteId: string;
+  date: string;
+  quote: string;
+}
+
+export interface PatternInsight {
+  key: string;
+  name: string;
+  description: string;
+  matches: PatternMatch[];
+}
+
+export interface ExportStatusResponse {
+  success: true;
+  status: 'pending' | 'processing' | 'ready' | 'failed';
+  expiresAt?: string;
+  generatedAt?: string;
+  downloadUrl?: string;
+  failureCode?: string;
+}
+
+export interface DeletionStatusResponse {
+  success: true;
+  status: 'pending' | 'processing' | 'completed' | 'failed';
+  queuedAt?: string;
+  completedAt?: string;
+}
+
+export interface ReceiptRecord {
+  id: string;
+  noteId: string;
+  contentType: string;
+  sizeBytes: string;
+  scanStatus: 'pending' | 'clean' | 'rejected';
+  createdAt: string;
+}
+
+export type ReceiptOcrResponse =
+  | { receiptId: string; status: 'processing'; stage: 'security_scan'; retryAfterSeconds: number }
+  | { receiptId: string; status: 'blocked'; reason: string }
+  | { receiptId: string; status: 'unavailable'; reason: string }
+  | { receiptId: string; status: 'ready'; text: string; extractedAt: string };
+
+export interface ReceiptUploadAsset {
+  uri: string;
+  contentType: string;
+}
+
 export function resolveApiBaseUrl(configuredUrl?: string, hostUri?: string, isDevelopment = false): string {
   const configured = configuredUrl?.trim().replace(/\/$/, '');
   if (configured) return configured;
@@ -138,6 +207,49 @@ async function apiFetch(endpoint: string, options: RequestInit = {}): Promise<an
   return response.json();
 }
 
+async function uploadReceiptAsset(noteId: string, asset: ReceiptUploadAsset): Promise<ReceiptRecord> {
+  const fileResponse = await fetch(asset.uri);
+  const body = await fileResponse.blob();
+  if (body.size <= 0) throw new Error('The selected file is empty.');
+
+  const authorization = await apiFetch('/v1/receipts/upload-url', {
+    method: 'POST',
+    body: JSON.stringify({ noteId, contentType: asset.contentType, sizeBytes: body.size }),
+  }) as {
+    reservationId: string;
+    uploadUrl: string;
+    method: string;
+    headers?: Record<string, string>;
+  };
+
+  const isExternalUrl = /^https?:\/\//i.test(authorization.uploadUrl);
+  const uploadUrl = isExternalUrl ? authorization.uploadUrl : `${getApiBaseUrl()}${authorization.uploadUrl}`;
+  const headers: Record<string, string> = {
+    ...(authorization.headers || {}),
+    'Content-Type': asset.contentType,
+  };
+  if (!isExternalUrl) {
+    const accessToken = await getAccessToken();
+    if (accessToken) headers.Authorization = `Bearer ${accessToken}`;
+  }
+
+  const uploadResponse = await fetch(uploadUrl, {
+    method: authorization.method || 'PUT',
+    headers,
+    body,
+  });
+  if (!uploadResponse.ok) {
+    const errorBody = await uploadResponse.json().catch(() => ({}));
+    throw new Error(errorBody.message || errorBody.error || 'Receipt upload failed.');
+  }
+
+  const confirmation = await apiFetch('/v1/receipts/confirm', {
+    method: 'POST',
+    body: JSON.stringify({ reservationId: authorization.reservationId }),
+  }) as { receipt: ReceiptRecord };
+  return confirmation.receipt;
+}
+
 // ── API Operations ──────────────────────────────────────────────────────────
 export const api = {
   auth: {
@@ -237,6 +349,42 @@ export const api = {
     delete: (id: string) => apiFetch(`/v1/people/${id}`, { method: 'DELETE' }),
   },
 
+  receipts: {
+    list: (noteId: string): Promise<ReceiptRecord[]> =>
+      apiFetch(`/v1/receipts?noteId=${encodeURIComponent(noteId)}`),
+    upload: uploadReceiptAsset,
+    delete: (receiptId: string): Promise<{ success: true }> =>
+      apiFetch(`/v1/receipts/${encodeURIComponent(receiptId)}`, { method: 'DELETE' }),
+    getOcr: (receiptId: string): Promise<ReceiptOcrResponse> =>
+      apiFetch(`/v1/receipts/${encodeURIComponent(receiptId)}/ocr`),
+    requestOcr: (receiptId: string): Promise<ReceiptOcrResponse> =>
+      apiFetch(`/v1/receipts/${encodeURIComponent(receiptId)}/ocr`, { method: 'POST' }),
+    deleteOcr: (receiptId: string): Promise<{ success: true }> =>
+      apiFetch(`/v1/receipts/${encodeURIComponent(receiptId)}/ocr`, { method: 'DELETE' }),
+  },
+
+  search: {
+    query: (query: string, options: { boxId?: string; page?: number; limit?: number } = {}): Promise<SearchResponse> => {
+      const params = new URLSearchParams({ q: query });
+      if (options.boxId) params.set('boxId', options.boxId);
+      if (options.page) params.set('page', String(options.page));
+      if (options.limit) params.set('limit', String(options.limit));
+      return apiFetch(`/v1/search?${params.toString()}`);
+    },
+  },
+
+  patterns: {
+    list: (): Promise<PatternInsight[]> => apiFetch('/v1/patterns'),
+    dismiss: (patternKey: string) => apiFetch('/v1/patterns/dismiss', {
+      method: 'POST',
+      body: JSON.stringify({ patternKey }),
+    }),
+    snooze: (patternKey: string, snoozedUntil: string) => apiFetch('/v1/patterns/snooze', {
+      method: 'POST',
+      body: JSON.stringify({ patternKey, snoozedUntil }),
+    }),
+  },
+
   perspectives: {
     generate: (noteId: string, intensity?: string, scope?: string) =>
       apiFetch(`/v1/notes/${noteId}/perspectives`, {
@@ -258,7 +406,7 @@ export const api = {
 
     requestDataExport: () => apiFetch('/v1/privacy/export-request', { method: 'POST', body: JSON.stringify({ format: 'zip' }) }),
 
-    getDataExportStatus: (ticketId: string) => apiFetch(`/v1/privacy/export-request/${encodeURIComponent(ticketId)}`),
+    getDataExportStatus: (ticketId: string): Promise<ExportStatusResponse> => apiFetch(`/v1/privacy/export-request/${encodeURIComponent(ticketId)}`),
 
     fileDSAR: (requestType: string) =>
       apiFetch('/v1/privacy/request', {
@@ -268,12 +416,20 @@ export const api = {
 
     deleteAccount: () => apiFetch('/v1/account/delete', { method: 'POST' }),
 
-    getDeletionStatus: (statusToken: string) => apiFetch('/v1/privacy/delete/status', {
+    getDeletionStatus: (statusToken: string): Promise<DeletionStatusResponse> => apiFetch('/v1/privacy/delete/status', {
       headers: { Authorization: `DeletionStatus ${statusToken}` },
     }),
   },
 
   entitlements: {
     get: () => apiFetch('/v1/entitlements/me'),
+  },
+
+  storekit: {
+    getPurchaseContext: (): Promise<{ appAccountToken: string }> => apiFetch('/v1/entitlements/me'),
+    sync: (signedTransactions: string[]) => apiFetch('/v1/storekit/transactions/sync', {
+      method: 'POST',
+      body: JSON.stringify({ signedTransactions }),
+    }),
   },
 };

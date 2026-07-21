@@ -14,6 +14,7 @@ import {
   PROMOTIONAL_PRODUCT_MAP,
   VerifiedStoreKitTransaction,
   PromotionalGrantType,
+  isPromotionalProductId,
 } from './storekitVerification.js';
 import { getEffectiveEntitlement, EffectiveEntitlement } from './entitlementResolver.js';
 import { addCalendarMonthsClamped } from '../utils/dateUtils.js';
@@ -67,6 +68,14 @@ export async function claimPromotionalTransactions(input: {
   for (const signedTransaction of [...new Set(signedTransactions)]) {
     try {
       const verified = await verifyStoreKitTransaction(signedTransaction);
+      if (!isPromotionalProductId(verified.productId)) {
+        verifiedItems.push({
+          verified: null,
+          error: 'STOREKIT_PROMOTIONAL_PRODUCT_REQUIRED',
+          grantType: null,
+        });
+        continue;
+      }
       verifiedItems.push({
         verified,
         error: null,
@@ -104,6 +113,16 @@ export async function claimPromotionalTransactions(input: {
     }
 
     const transaction = item.verified;
+    if (!isPromotionalProductId(transaction.productId)) {
+      results.push({
+        transactionId: transaction.transactionId,
+        productId: transaction.productId,
+        grantType: null,
+        status: 'rejected',
+        errorCode: 'STOREKIT_PROMOTIONAL_PRODUCT_REQUIRED',
+      });
+      continue;
+    }
     const product = PROMOTIONAL_PRODUCT_MAP[transaction.productId];
     const grantType = product.grantType;
 

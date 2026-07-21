@@ -9,6 +9,19 @@ vi.mock('@react-native-async-storage/async-storage', () => ({
   },
 }));
 
+vi.mock('@/services/secure-local-storage', () => ({
+  getEncryptedJson: vi.fn(async (key: string) => {
+    const value = storage.get(key);
+    return value === undefined ? null : JSON.parse(value);
+  }),
+  setEncryptedJson: vi.fn(async (key: string, value: unknown) => {
+    storage.set(key, JSON.stringify(value));
+  }),
+  removeEncryptedItem: vi.fn(async (key: string) => {
+    storage.delete(key);
+  }),
+}));
+
 import { clearMutationQueue, drainMutationQueue, enqueueMutation, readMutationQueue, resolveMappedId } from '@/services/offline-queue';
 
 describe('durable offline mutation queue', () => {

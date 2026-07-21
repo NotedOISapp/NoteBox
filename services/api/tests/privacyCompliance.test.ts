@@ -378,7 +378,7 @@ describe('Privacy Compliance & Access Request System Tests', () => {
     });
   });
 
-  describe('8. OCR Gating & Search Gating by Consent', () => {
+  describe('8. OCR Consent and Search', () => {
     it('rejects OCR trigger if AI processing consent is false', async () => {
       setupAuthMocks();
 
@@ -399,11 +399,9 @@ describe('Privacy Compliance & Access Request System Tests', () => {
       expect(response.body.error).toBe('ConsentRequired');
     });
 
-    it('gates OCR results in global search if consent is not granted', async () => {
+    it('keeps non-OCR search available without consulting current AI consent', async () => {
       setupAuthMocks();
 
-      // select privacy preferences
-      mockQueryQueue.push([{ userId, aiProcessingAllowed: false }]);
       // select boxes
       mockQueryQueue.push([{ id: 'box-1', name: 'Work' }]);
       // select notes

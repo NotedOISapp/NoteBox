@@ -8,6 +8,8 @@ import { SymbolView } from 'expo-symbols';
 import { LinearGradient } from 'expo-linear-gradient';
 import Animated, { FadeIn } from 'react-native-reanimated';
 import { isAppleSignInAvailable, requestAppleSignIn } from '@/services/apple-auth';
+import * as SecureStore from 'expo-secure-store';
+import { api } from '@/services/api';
 
 interface SignInProps {
   onSignedIn?: () => void;
@@ -19,9 +21,53 @@ export default function SignInScreen({ onSignedIn }: SignInProps) {
   const [loading, setLoading] = useState(false);
   const [isButtonPressed, setIsButtonPressed] = useState(false);
   const [appleAvailable, setAppleAvailable] = useState(Platform.OS === 'ios');
+  const [deletionStatus, setDeletionStatus] = useState<string | null>(null);
 
   React.useEffect(() => {
     isAppleSignInAvailable().then(setAppleAvailable).catch(() => setAppleAvailable(false));
+  }, []);
+
+  React.useEffect(() => {
+    let active = true;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+
+    const poll = async () => {
+      const token = await SecureStore.getItemAsync('deletion_status_token');
+      if (!token || !active) return;
+
+      try {
+        const response = await api.compliance.getDeletionStatus(token);
+        if (!active) return;
+        setDeletionStatus(response.status);
+        if (response.status === 'pending' || response.status === 'processing') {
+          timer = setTimeout(() => void poll(), 5000);
+        } else if (response.status === 'completed') {
+          await Promise.all([
+            SecureStore.deleteItemAsync('deletion_status_token'),
+            SecureStore.deleteItemAsync('deletion_status_expires_at'),
+          ]);
+        }
+      } catch (error) {
+        if (!active) return;
+        const status = typeof error === 'object' && error && 'status' in error ? Number(error.status) : 0;
+        if (status === 410) {
+          setDeletionStatus('status link expired');
+          await Promise.all([
+            SecureStore.deleteItemAsync('deletion_status_token'),
+            SecureStore.deleteItemAsync('deletion_status_expires_at'),
+          ]);
+        } else {
+          setDeletionStatus('status temporarily unavailable');
+          timer = setTimeout(() => void poll(), 10000);
+        }
+      }
+    };
+
+    void poll();
+    return () => {
+      active = false;
+      if (timer) clearTimeout(timer);
+    };
   }, []);
 
   const handleAppleSignIn = async () => {
@@ -70,6 +116,14 @@ export default function SignInScreen({ onSignedIn }: SignInProps) {
 
           {/* Action Row */}
           <View style={styles.actionBlock}>
+            {deletionStatus && (
+              <View style={styles.deletionStatusCard} accessibilityRole="summary">
+                <ThemedText type="smallBold">Account deletion</ThemedText>
+                <ThemedText type="small" style={styles.deletionStatusText}>
+                  {deletionStatus === 'completed' ? 'Deletion is complete.' : `Status: ${deletionStatus}`}
+                </ThemedText>
+              </View>
+            )}
             <Pressable
               onPressIn={() => setIsButtonPressed(true)}
               onPressOut={() => setIsButtonPressed(false)}
@@ -203,6 +257,17 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     gap: Spacing.three,
     marginBottom: 48,
+  },
+  deletionStatusCard: {
+    width: '100%',
+    padding: Spacing.three,
+    borderRadius: 14,
+    backgroundColor: 'rgba(255,255,255,0.55)',
+    alignItems: 'center',
+    gap: Spacing.one,
+  },
+  deletionStatusText: {
+    textAlign: 'center',
   },
   appleBtn: {
     width: '100%',

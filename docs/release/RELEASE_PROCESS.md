@@ -1,47 +1,45 @@
 # NoteBox Release Process
 
-## Normal release
+## Normal Release
 
-1. Merge completed features into develop.
-2. Confirm develop CI passes.
-3. Create release/x.y.z from develop.
+1. Merge each intended feature or bug fix into `main` through a focused pull request.
+2. Confirm `main` CI passes and the intended release scope is complete.
+3. Create `release/x.y.z` from that verified `main` commit.
 4. Freeze features.
-5. Run release candidate workflow.
-6. Build TestFlight candidate.
-7. Founder tests on real iPhone.
-8. Fix release blockers only.
-9. Merge release branch into main.
-10. Tag release from main.
-11. Submit to App Store.
-12. Merge main back into develop.
+5. Run the release-candidate workflow.
+6. Build the TestFlight candidate.
+7. Have the founder test it on a real iPhone.
+8. Fix release blockers only on the release branch, with regression tests.
+9. Merge the release pull request into `main` after approval.
+10. Tag the resulting `main` commit.
+11. Submit the verified build to the App Store.
 
-## Hotfix release
+## Hotfix Release
 
-1. Confirm live production issue.
-2. Create hotfix/x.y.z-description from main.
-3. Write failing regression test.
-4. Apply smallest safe fix.
-5. Run hotfix workflow.
-6. Build patch candidate.
-7. Founder verifies on real iPhone.
-8. Merge hotfix into main.
-9. Tag patch release.
-10. Merge main back into develop.
-11. Document incident.
+1. Confirm the live production issue.
+2. Create `hotfix/<area>-<description>` from `main`.
+3. Write a failing regression test.
+4. Apply the smallest safe fix.
+5. Run the hotfix workflow.
+6. Build the patch candidate.
+7. Have the founder verify it on a real iPhone.
+8. Merge the hotfix pull request into `main`.
+9. Tag the resulting patch release.
+10. Document the incident.
 
-## Rollback options
+## Rollback Options
 
 Use the safest available rollback:
 
-- Revert commit
-- Disable feature flag
-- Roll back backend config
-- Pause App Store phased release
-- Submit patch release
-- Disable risky server-side feature
-- Roll back migration only if rollback was designed and tested
+- Revert a pull request
+- Disable a feature flag
+- Roll back backend configuration
+- Pause an App Store phased release
+- Submit a patch release
+- Disable a risky server-side feature
+- Roll back a migration only if rollback was designed and tested
 
-## Absolute rule
+## Absolute Rule
 
 No App Store submission may rely on a feature branch alone.
 

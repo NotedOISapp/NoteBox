@@ -23,7 +23,7 @@ All production-code changes require Evidence-Based TDD.
 
 All releases require a release branch and release candidate verification.
 
-All production hotfixes require a hotfix branch, regression test, verification, merge to main, and merge back to develop.
+All production hotfixes require a hotfix branch, regression test, verification, and merge to `main` through a pull request.
 
 A passing feature branch is not a passing application.
 

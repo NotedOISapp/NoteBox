@@ -1,0 +1,35 @@
+{
+  "name": "notebox",
+  "private": true,
+  "scripts": {
+    "mobile:install": "cd apps/mobile && npm ci",
+    "mobile:lint": "cd apps/mobile && npm run lint",
+    "mobile:typecheck": "cd apps/mobile && npm run typecheck",
+    "mobile:test": "cd apps/mobile && npm run test",
+    "mobile:audit:production": "cd apps/mobile && npm audit --omit=dev --audit-level=high",
+    "api:install": "cd services/api && npm ci",
+    "api:typecheck": "cd services/api && npm run typecheck",
+    "api:test": "cd services/api && npm test",
+    "api:test:unit": "cd services/api && npm run test:unit",
+    "api:test:integration": "cd services/api && npm run test:integration",
+    "api:audit:production": "cd services/api && npm audit --omit=dev --audit-level=high",
+    "api:lint": "cd services/api && npm run lint",
+    "api:build": "cd services/api && npm run build",
+    "lint": "npm run mobile:lint && npm run api:lint",
+    "build": "npm run api:build && npm run mobile:typecheck",
+    "test": "npm run check:repository && npm run mobile:test && npm run api:test",
+    "audit:production": "npm run mobile:audit:production && npm run api:audit:production",
+    "check:no-test-shortcuts": "node scripts/check-no-test-shortcuts.js",
+    "check:env-safety": "node scripts/check-env-safety.js",
+    "check:package-locks": "node scripts/check-package-locks.js",
+    "check:test-suites": "node scripts/check-test-suite-classification.mjs",
+    "check:migrations": "node scripts/check-migration-integrity.js",
+    "check:repo-integrity": "node scripts/check-repository-integrity.js",
+    "check:repository": "npm run check:no-test-shortcuts && npm run check:env-safety && npm run check:package-locks && npm run check:test-suites && npm run check:migrations && npm run check:repo-integrity",
+    "verify": "npm run check:repository && npm run lint && npm run build && npm run mobile:test && npm run api:test"
+  },
+  "engines": {
+    "node": ">=22.16.0 <23"
+  },
+  "packageManager": "npm@10.9.2"
+}

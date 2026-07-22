@@ -1,0 +1,9 @@
+* @NotedOISapp
+
+.github/ @NotedOISapp
+AGENTS.md @NotedOISapp
+docs/product/NOTEBOX_V1_MASTER_HANDOFF.md @NotedOISapp
+docs/architecture/TDD_DOCTRINE.md @NotedOISapp
+docs/release/RELEASE_PROCESS.md @NotedOISapp
+apps/mobile/ @NotedOISapp
+services/api/ @NotedOISapp

@@ -14,14 +14,43 @@ If AI disappeared, the user's saved Notes, Receipts, People tags, Search, Boxes,
 
 ---
 
+## Production workflow
+
+NoteBox uses protected branch development.
+
+- `main` is production-ready only.
+- `develop` is integration.
+- `feature/*` is for isolated features.
+- `bugfix/*` is for normal bug fixes.
+- `hotfix/*` is for production emergencies.
+- `release/*` is for TestFlight and App Store release candidates.
+
+Do not push directly to `main`.
+
+Read `AGENTS.md` and `docs/release/RELEASE_PROCESS.md` before changing code.
+
+---
+
 ## Product Status
 
-Status: v1 build  
-Platform: iOS first  
-Deployment target: Apple App Store  
-Founder workflow: PC-based review through Google Antigravity, Expo EAS builds, TestFlight, and iPhone testing  
-Production build path: React Native + Expo EAS Development Builds  
+Status: v1 build
+Platform: iOS first
+Deployment target: Apple App Store
+Founder workflow: PC-based review through Google Antigravity, Expo EAS builds, TestFlight, and iPhone testing
+Production build path: React Native + Expo EAS Development Builds
 Production runtime: Not Expo Go only
+
+---
+
+## Repository Boundaries
+
+The repository is a segmented workspace with independent dependency trees and ownership:
+
+- `services/api/` is the backend. It owns authentication, authorization, persistence, migrations, Receipt processing, Search, Perspectives, entitlements, exports, workers, and server-side enforcement.
+- `apps/mobile/` is the current iOS-first frontend. It owns React Native/Expo screens, device privacy, encrypted offline behavior, StoreKit presentation, and API consumption. It does not replace backend enforcement.
+- `.github/`, `scripts/`, and `docs/` are repository governance, verification, and canonical documentation—not application runtime code.
+
+A future web frontend must be added as its own application boundary (for example `apps/web/`) with its own manifest, lockfile, tests, owners, and feature branches. It must consume the backend contract rather than importing backend internals. Backend, mobile, and future-web changes should remain separate focused pull requests whenever their contracts allow it.
 
 ---
 
@@ -662,28 +691,24 @@ A v1 build is acceptable only when a user can:
 
 ## Local Development
 
-Install dependencies:
+Install the independent mobile and backend dependency trees from their lockfiles:
 
 ```bash
-npm install
+npm run mobile:install
+npm run api:install
 ```
 
-Start development server:
+Start the mobile development server:
 
 ```bash
-npx expo start
+cd apps/mobile
+npm start
 ```
 
-Run linting:
+Run the complete repository gate (integrations require Docker):
 
 ```bash
-npm run lint
-```
-
-Run tests:
-
-```bash
-npm test
+npm run verify
 ```
 
 Create an EAS development build:

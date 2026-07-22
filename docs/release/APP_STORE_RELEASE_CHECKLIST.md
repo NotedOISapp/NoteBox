@@ -7,7 +7,7 @@ Commit SHA:
 
 ## Required checks
 
-- [ ] Release branch created from develop
+- [ ] Release branch created from the current verified `main`
 - [ ] No new features added after release branch
 - [ ] Full CI passed
 - [ ] Release candidate workflow passed

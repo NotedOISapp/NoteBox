@@ -14,16 +14,32 @@ If AI disappeared, the user's saved Notes, Receipts, People tags, Search, Boxes,
 
 ---
 
+## Start Here: Where Should I Make a Change?
+
+Use the [plain-language repository map](docs/architecture/REPOSITORY_MAP.md) before opening a branch. It tells you which part owns a problem, which README to read, and which checks prove the change is safe.
+
+The short version:
+
+- A server, database, login, subscription, upload, search, export, or AI-processing problem belongs in [`services/api/`](services/api/README.md).
+- An iPhone screen, navigation, device privacy, offline draft, StoreKit presentation, or accessibility problem belongs in [`apps/mobile/`](apps/mobile/README.md).
+- A build, automated check, repository safety, or release-process problem belongs in `.github/`, `scripts/`, or `docs/`.
+- The future web frontend does not exist yet. When approved, it belongs in `apps/web/` as an independent app; do not mix it into the backend or mobile app.
+
+Folders are the permanent boundaries. Git branches are short-lived packages of work. Read the [branching strategy](docs/architecture/BRANCHING_STRATEGY.md) for plain-language names such as `bugfix/api-receipt-upload` and `feature/mobile-search`.
+
+---
+
 ## Production workflow
 
 NoteBox uses protected branch development.
 
 - `main` is production-ready only.
-- `develop` is integration.
-- `feature/*` is for isolated features.
-- `bugfix/*` is for normal bug fixes.
+- `main` is the only permanent development line unless a later release requirement explicitly justifies another.
+- `feature/<area>-<description>` is for isolated features based on `main`.
+- `bugfix/<area>-<description>` is for normal bug fixes based on `main`.
 - `hotfix/*` is for production emergencies.
 - `release/*` is for TestFlight and App Store release candidates.
+- `docs/*` and `chore/*` are for documentation and repository maintenance.
 
 Do not push directly to `main`.
 

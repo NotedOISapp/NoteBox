@@ -14,6 +14,41 @@ If AI disappeared, the user's saved Notes, Receipts, People tags, Search, Boxes,
 
 ---
 
+## Start Here: Mobile Frontend Guide
+
+This folder is the current frontend: the iPhone app the user sees and touches.
+
+It owns screens, navigation, app-wide presentation state, encrypted offline behavior, device privacy, StoreKit presentation, accessibility, and calls to the backend. It does not own permanent authorization, server-side limits, canonical saved records, Receipt storage integrity, or AI enforcement; those belong in the [`services/api/` backend](../../services/api/README.md).
+
+| Location | What it does | Look here when |
+| --- | --- | --- |
+| `src/app/` | Active Expo routes and screens | A screen, tap, route, or on-screen flow is wrong |
+| `src/components/` | Reusable visual pieces | The same control looks or behaves incorrectly in several screens |
+| `src/context/` | App-wide state and entitlement presentation | Screens disagree about selected data or current access |
+| `src/services/` | Backend calls and device services | Networking, StoreKit presentation, privacy lock, secure storage, or offline replay fails |
+| `src/features/` | Planned feature boundaries and feature documentation | A focused extraction is being designed; read its README before moving runtime code |
+| `src/shared/` | Planned reusable mobile infrastructure | Shared extraction is being designed; do not assume these shells are active runtime code |
+| `assets/` and mobile configuration | Images, icons, fonts, and Expo/iOS packaging | Branding or a device build is wrong |
+
+Important: `src/app/`, `src/components/`, `src/context/`, and `src/services/` currently contain the active runtime. Many `src/features/` and `src/shared/` folders are documented extraction boundaries, not proof that the runtime has already moved there.
+
+Use a focused branch such as `bugfix/mobile-draft-recovery` or `feature/mobile-search-filters`. If a change also needs the backend, prefer a backward-compatible backend pull request first and a mobile pull request second.
+
+Before merging a mobile change, run:
+
+```bash
+npm run mobile:lint
+npm run mobile:typecheck
+npm run mobile:test
+npm run check:repository
+```
+
+Changes to StoreKit, Sign in with Apple, privacy lock, panic hide, secure local storage, pickers, native permissions, or App Store packaging also require proof in an EAS development build on a real iPhone. Passing JavaScript tests alone cannot verify those native behaviors.
+
+For the complete folder decision guide, read the [repository map](../../docs/architecture/REPOSITORY_MAP.md).
+
+---
+
 ## Product Status
 
 Status: v1 build
